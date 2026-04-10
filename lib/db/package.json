@@ -1,0 +1,14 @@
+{
+  "name": "@zeroplate/db",
+  "version": "1.0.0",
+  "private": true,
+  "main": "src/index.ts",
+  "type": "module",
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "mongoose": "^8.1.0",
+    "zod": "^3.25.76"
+  }
+}

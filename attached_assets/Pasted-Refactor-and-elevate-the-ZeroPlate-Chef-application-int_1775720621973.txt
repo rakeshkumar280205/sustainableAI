@@ -1,0 +1,242 @@
+Refactor and elevate the “ZeroPlate Chef” application into a production-grade, industry-standard full-stack system with clean architecture, strong reliability, and maintainable code quality.
+
+---
+
+🎯 PRIMARY OBJECTIVE
+
+Transform the application into a system that is:
+
+- Cleanly architected
+- Highly reliable and failure-safe
+- Easy to scale and maintain
+- Fully consistent in behavior
+- Ready for real-world deployment
+
+---
+
+🏗️ 1. ARCHITECTURE REFACTOR (CRITICAL)
+
+Backend must follow layered architecture:
+
+- routes/ → API endpoints only
+- services/ → business logic (AI, recipe processing)
+- core/ → configuration, environment, utilities
+- models/ → request/response schemas
+- middleware/ → error handling, logging
+
+Strict separation of concerns:
+
+- No business logic inside routes
+- No direct API calls inside controllers
+
+---
+
+Frontend must follow modular architecture:
+
+- components/ → reusable UI components
+- pages/ → main views
+- services/ → API calls
+- hooks/ → reusable logic
+- utils/ → helpers
+
+---
+
+🧠 2. STRICT DATA CONTRACT & VALIDATION
+
+- Enforce schema validation on both:
+  
+  - request (input validation)
+  - response (output validation)
+
+- Use a single consistent response structure:
+
+{
+"success": true,
+"data": {
+"recipes": [...],
+"ingredients": [...],
+"cuisine": "...",
+"isFallback": boolean
+},
+"error": null
+}
+
+---
+
+⚡ 3. ERROR HANDLING SYSTEM (MANDATORY)
+
+Implement centralized error handling:
+
+- API errors
+- AI failures
+- Timeout handling
+- Invalid input
+
+Frontend must show user-friendly messages:
+
+- “Unable to fetch AI results — using fallback recipes”
+- “Please enter valid ingredients”
+
+---
+
+🧠 4. AI SERVICE LAYER (ROBUST DESIGN)
+
+- Isolate AI logic in a dedicated service
+
+- Add:
+  
+  - Timeout control (3–4 seconds max)
+  - Retry logic (1 retry max)
+  - Fallback trigger
+
+- Enforce strict prompt format
+
+- Always parse AI response into structured format
+
+---
+
+🔁 5. FALLBACK SYSTEM (CRITICAL)
+
+- Predefined high-quality recipes for:
+  
+  - Indian
+  - Italian
+  - Chinese
+
+- Must include:
+  
+  - realistic recipes
+  - correct used/missing ingredients
+  - efficiency scoring
+
+- Fallback must be indistinguishable from AI output
+
+---
+
+📷 6. IMAGE PROCESSING LAYER
+
+- Always return ingredient list
+
+- Add:
+  
+  - sanitization (remove duplicates, normalize text)
+  - edit capability in frontend
+
+- Never allow failure
+
+---
+
+🌱 7. SUSTAINABILITY ENGINE
+
+- Centralize logic for:
+  
+  - ingredient usage count
+  - waste estimation
+
+- Make calculation reusable and testable
+
+---
+
+⚡ 8. PERFORMANCE OPTIMIZATION
+
+- Minimize API latency
+- Avoid unnecessary frontend re-renders
+- Use memoization where needed
+- Ensure app works on low bandwidth
+
+---
+
+🧪 9. EDGE CASE HANDLING
+
+Handle:
+
+- Empty input
+- Duplicate ingredients
+- Invalid cuisine
+- Very small ingredient sets
+- AI returning malformed output
+
+---
+
+🧾 10. LOGGING & DEBUGGING
+
+Add structured logging:
+
+- Request logs
+- Error logs
+- AI response logs (sanitized)
+
+Ensure logs are readable and useful
+
+---
+
+🔐 11. CONFIGURATION MANAGEMENT
+
+- Use environment variables
+- No hardcoded keys
+- Provide ".env.example"
+
+---
+
+🧱 12. CODE QUALITY STANDARDS
+
+- Consistent naming conventions
+- Clear function responsibilities
+- No duplicate logic
+- Proper comments where necessary
+
+---
+
+🎨 13. UI/UX FINAL POLISH
+
+- Clean layout
+- Consistent spacing
+- Clear hierarchy
+- Smooth loading states
+- Accessible design (readable text, contrast)
+
+---
+
+🔄 14. STATE MANAGEMENT
+
+- Maintain clean state flow
+- Avoid unnecessary state duplication
+- Ensure predictable UI updates
+
+---
+
+🚀 15. DEPLOYMENT READINESS
+
+Prepare project for deployment:
+
+- Backend:
+  - Start command
+  - Environment setup
+- Frontend:
+  - Build-ready configuration
+
+---
+
+🏁 FINAL REQUIREMENTS
+
+The application must:
+
+- Never crash
+- Always return structured data
+- Handle all edge cases gracefully
+- Be easy to understand and extend
+- Feel like a production-ready SaaS product
+
+---
+
+✅ FINAL EXPECTATION
+
+ZeroPlate Chef should demonstrate:
+
+- Professional engineering practices
+- Clean architecture
+- Reliable AI integration
+- Strong user experience
+- Real-world applicability
+
+Ensure no regression in existing features.

@@ -1,0 +1,437 @@
+openapi: 3.1.0
+info:
+  # Do not change the title, if the title changes, the import paths will be broken
+  title: Api
+  version: 0.1.0
+  description: EcoPlate AI API specification
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: recipes
+    description: Recipe suggestion operations
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponseEnvelope"
+
+  /recipes:
+    post:
+      operationId: generateRecipes
+      tags: [recipes]
+      summary: Generate cuisine-specific recipe suggestions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GenerateRecipesBody"
+      responses:
+        "200":
+          description: Recipe suggestions generated successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenerateRecipesResponseEnvelope"
+        "400":
+          description: Invalid input
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /recipes/detect-ingredients:
+    post:
+      operationId: detectIngredients
+      tags: [recipes]
+      summary: Detect ingredients from image (with guaranteed fallback)
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/DetectIngredientsBody"
+      responses:
+        "200":
+          description: Ingredients detected
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DetectIngredientsResponseEnvelope"
+        "400":
+          description: Invalid input
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /recipes/history:
+    get:
+      operationId: getRecipeHistory
+      tags: [recipes]
+      summary: Get recent recipe history
+      responses:
+        "200":
+          description: Recipe history retrieved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecipeHistoryResponseEnvelope"
+
+  /recipes/history/{id}:
+    delete:
+      operationId: deleteRecipeHistory
+      tags: [recipes]
+      summary: Delete a recipe history item by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Successfully deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteHistoryResponseEnvelope"
+        "404":
+          description: Item not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /recipes/stats:
+    get:
+      operationId: getRecipeStats
+      tags: [recipes]
+      summary: Get food waste reduction stats
+      responses:
+        "200":
+          description: Stats retrieved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecipeStatsResponseEnvelope"
+
+components:
+  schemas:
+    ErrorObject:
+      type: object
+      properties:
+        message:
+          type: string
+        details:
+          type: string
+      required:
+        - message
+
+    ErrorEnvelope:
+      type: object
+      properties:
+        success:
+          type: boolean
+          enum: [false]
+        data:
+          type: ["null", "object", "array", "string", "number", "boolean"]
+        error:
+          $ref: "#/components/schemas/ErrorObject"
+      required:
+        - success
+        - error
+
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+        timestamp:
+          type: string
+        environment:
+          type: string
+        port:
+          type: integer
+        database:
+          type: string
+        ai:
+          type: object
+          properties:
+            openai:
+              type: string
+            huggingface:
+              type: string
+          required:
+            - openai
+            - huggingface
+      required:
+        - status
+        - timestamp
+        - environment
+        - port
+        - database
+        - ai
+
+    HealthResponseEnvelope:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          $ref: "#/components/schemas/HealthStatus"
+        error:
+          type: "null"
+      required:
+        - success
+        - data
+        - error
+
+    GenerateRecipesBody:
+      type: object
+      properties:
+        ingredients:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+          description: Ingredients as comma-separated string or array of strings
+        cuisine:
+          type: ["string", "null"]
+          description: Optional cuisine type (e.g. Italian, Indian, Chinese)
+      required:
+        - ingredients
+
+    Recipe:
+      type: object
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        instructions:
+          type: string
+        cookTime:
+          type: string
+        difficulty:
+          type: string
+        used:
+          type: array
+          items:
+            type: string
+          description: Ingredients from the user's list that this recipe uses
+        missing:
+          type: array
+          items:
+            type: string
+          description: Ingredients this recipe needs that the user doesn't have
+      required:
+        - name
+        - description
+        - instructions
+        - cookTime
+        - difficulty
+        - used
+        - missing
+
+    GenerateRecipesResponse:
+      type: object
+      properties:
+        recipes:
+          type: array
+          items:
+            $ref: "#/components/schemas/Recipe"
+        sustainabilityMessage:
+          type: string
+        ingredientsUsed:
+          type: array
+          items:
+            type: string
+        cuisine:
+          type: ["string", "null"]
+        isFallback:
+          type: boolean
+          description: True when smart fallback recipes were used instead of live AI
+        provider:
+          type: string
+        confidence:
+          type: number
+        cacheHit:
+          type: boolean
+      required:
+        - recipes
+        - sustainabilityMessage
+        - ingredientsUsed
+        - cuisine
+        - isFallback
+        - provider
+
+    GenerateRecipesResponseEnvelope:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          $ref: "#/components/schemas/GenerateRecipesResponse"
+        error:
+          type: "null"
+      required:
+        - success
+        - data
+        - error
+
+    DetectIngredientsBody:
+      type: object
+      properties:
+        image:
+          type: string
+          format: binary
+      required:
+        - image
+
+    DetectIngredientsResponse:
+      type: object
+      properties:
+        ingredients:
+          type: array
+          items:
+            type: string
+        confidence:
+          type: number
+        isApproximate:
+          type: boolean
+        provider:
+          type: string
+      required:
+        - ingredients
+        - confidence
+        - isApproximate
+        - provider
+
+    DetectIngredientsResponseEnvelope:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          $ref: "#/components/schemas/DetectIngredientsResponse"
+        error:
+          type: "null"
+      required:
+        - success
+        - data
+        - error
+
+    DeleteHistoryResponse:
+      type: object
+      properties:
+        deleted:
+          type: boolean
+      required:
+        - deleted
+
+    DeleteHistoryResponseEnvelope:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          $ref: "#/components/schemas/DeleteHistoryResponse"
+        error:
+          type: "null"
+      required:
+        - success
+        - data
+        - error
+
+    RecipeHistoryItem:
+      type: object
+      properties:
+        id:
+          type: string
+        ingredients:
+          type: string
+        cuisine:
+          type: ["string", "null"]
+        recipeCount:
+          type: integer
+        missingCount:
+          type: integer
+        createdAt:
+          type: string
+      required:
+        - id
+        - ingredients
+        - cuisine
+        - recipeCount
+        - missingCount
+        - createdAt
+
+    RecipeHistoryResponse:
+      type: object
+      properties:
+        history:
+          type: array
+          items:
+            $ref: "#/components/schemas/RecipeHistoryItem"
+      required:
+        - history
+
+    RecipeHistoryResponseEnvelope:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          $ref: "#/components/schemas/RecipeHistoryResponse"
+        error:
+          type: "null"
+      required:
+        - success
+        - data
+        - error
+
+    RecipeStatsResponse:
+      type: object
+      properties:
+        totalSearches:
+          type: integer
+        totalIngredientsUsed:
+          type: integer
+        mostUsedIngredients:
+          type: array
+          items:
+            type: string
+        wasteReductionScore:
+          type: integer
+      required:
+        - totalSearches
+        - totalIngredientsUsed
+        - mostUsedIngredients
+        - wasteReductionScore
+
+    RecipeStatsResponseEnvelope:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          $ref: "#/components/schemas/RecipeStatsResponse"
+        error:
+          type: "null"
+      required:
+        - success
+        - data
+        - error

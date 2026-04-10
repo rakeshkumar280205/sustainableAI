@@ -1,0 +1,21 @@
+{
+  "name": "zeroplate-chef",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "artifacts/eco-plate-ai",
+    "artifacts/api-server",
+    "lib/*"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev --workspace=artifacts/api-server\" \"npm run dev --workspace=artifacts/eco-plate-ai\"",
+    "start": "node artifacts/api-server/dist/index.js",
+    "build": "npm run build --workspace=lib/api-zod && npm run build --workspace=lib/db && npm run build --workspace=artifacts/eco-plate-ai && npm run build --workspace=artifacts/api-server",
+    "build:backend": "npm run build --workspace=lib/api-zod && npm run build --workspace=lib/db && npm run build --workspace=artifacts/api-server",
+    "build:frontend": "npm run build --workspace=artifacts/eco-plate-ai",
+    "clean": "rm -rf node_modules package-lock.json"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

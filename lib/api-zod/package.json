@@ -1,0 +1,14 @@
+{
+  "name": "@zeroplate/api-zod",
+  "version": "1.0.0",
+  "private": true,
+  "main": "src/index.ts",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "zod": "^3.25.76"
+  }
+}

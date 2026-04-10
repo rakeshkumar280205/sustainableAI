@@ -1,0 +1,201 @@
+Finalize and polish the “ZeroPlate Chef” application to production-grade quality with a strong focus on consistency, reliability, and a flawless demo experience.
+
+---
+
+🎯 PRIMARY OBJECTIVE
+
+Deliver a fully polished AI-powered web application that:
+
+- Feels like a real consumer product
+- Never breaks during demo
+- Maintains consistent behavior across all features
+- Clearly communicates sustainability impact
+
+---
+
+🧠 1. ENFORCE STRICT DATA CONTRACT (CRITICAL)
+
+Ensure backend always returns structured JSON:
+
+{
+"recipes": [
+{
+"name": "string",
+"used": ["string"],
+"missing": ["string"],
+"efficiencyScore": number
+}
+],
+"isFallback": boolean,
+"ingredients": ["string"],
+"cuisine": "string"
+}
+
+---
+
+Rules:
+
+- NEVER return raw AI text to frontend
+- ALWAYS parse and validate response
+- If parsing fails → fallback immediately
+
+---
+
+⚡ 2. ADD EFFICIENCY SCORING
+
+For each recipe:
+
+- Calculate:
+  efficiencyScore = usedIngredients / totalInputIngredients
+
+Frontend:
+
+- Display:
+  - “Uses X% of your ingredients”
+  - Highlight best recipe
+
+---
+
+🌱 3. IMPROVE SUSTAINABILITY ENGINE
+
+Enhance current logic:
+
+- Waste saved calculation:
+  grams = ingredients_used × 50–80g
+
+- Display:
+  “You used 3 ingredients and saved approx. 150–240g of food”
+
+- Add:
+  “Most efficient recipe selected” badge
+
+---
+
+🎨 4. UI POLISH (FINAL LEVEL)
+
+Ensure:
+
+- Perfect spacing and alignment
+
+- Clear visual hierarchy:
+  
+  1. Ingredients
+  2. Cuisine
+  3. Recipes
+  4. Sustainability impact
+
+- Recipe cards:
+  
+  - Strong contrast
+  - Clear badges
+  - Highlight best recipe
+
+---
+
+⚡ 5. UX PERFECTION
+
+Ensure:
+
+- Instant feedback on button click
+- Smooth loading state
+- No flicker or layout shift
+
+Buttons must work reliably:
+
+- Regenerate
+- Try another cuisine
+- Edit ingredients
+
+---
+
+📷 6. IMAGE INPUT FINALIZATION
+
+- Always show:
+  “Detected ingredients (approximate — editable)”
+
+- Add:
+  Inline edit box (user can modify ingredients directly)
+
+- Ensure:
+  
+  - No failure
+  - Always returns usable ingredients
+
+---
+
+🧠 7. AI RELIABILITY LAYER
+
+- Timeout handling (max 3–4 sec)
+
+- If delay:
+  → switch to fallback automatically
+
+- Improve prompt clarity:
+  Always enforce structured format:
+  Recipe 1:
+  Ingredients Used:
+  Missing Ingredients:
+
+---
+
+🧪 8. EDGE CASE HANDLING
+
+Handle:
+
+- Empty input
+- Duplicate ingredients
+- Invalid cuisine
+- Very few ingredients (1–2 items)
+
+Provide helpful UI messages:
+
+- “Add more ingredients for better results”
+
+---
+
+🚀 9. PERFORMANCE OPTIMIZATION
+
+- Minimize API response size
+- Avoid unnecessary re-renders
+- Ensure app works smoothly on low-end devices
+
+---
+
+🎤 10. DEMO MODE PERFECTION
+
+Ensure:
+
+- Demo always works offline or without API key
+
+- Predefined high-quality outputs for:
+  
+  - Indian + rice
+  - Italian + tomato
+  - Chinese + noodles
+
+- No visible errors ever
+
+---
+
+🏁 FINAL REQUIREMENTS
+
+The application must:
+
+- Always return structured data
+- Never crash
+- Feel fast and smooth
+- Clearly communicate sustainability value
+- Look visually polished and professional
+- Deliver a perfect 30–60 second demo
+
+---
+
+✅ FINAL EXPECTATION
+
+ZeroPlate Chef should feel like:
+
+“A production-ready AI-powered sustainable cooking assistant”
+
+—not a hackathon prototype.
+
+Ensure no regressions in existing working features.

@@ -1,0 +1,158 @@
+Refactor and optimize the EcoPlate AI application to make it hackathon-ready, reliable, and production-grade in terms of user experience and response consistency.
+
+---
+
+🎯 PRIMARY OBJECTIVE
+
+Transform the app from a feature-heavy system into a clean, reliable, and demo-optimized AI product focused on:
+
+- Food waste reduction
+- Ingredient-based cooking
+- Cuisine-aware recommendations
+
+---
+
+🧠 1. SIMPLIFY ARCHITECTURE (IMPORTANT)
+
+- Remove or ignore unnecessary complexity:
+  - Recipe history database (optional, not required)
+  - Overuse of OpenAPI abstractions
+- Keep only:
+  - Ingredient input
+  - Cuisine selection
+  - Recipe generation
+  - Missing ingredients
+  - Image fallback detection
+
+Ensure code remains modular but lightweight.
+
+---
+
+🔄 2. ENFORCE STRICT AI RESPONSE FORMAT
+
+AI output must follow this exact structure:
+
+Recipe 1: <name>
+Ingredients Used: <list>
+Missing Ingredients: <list>
+
+Recipe 2: <name>
+Ingredients Used: <list>
+Missing Ingredients: <list>
+
+---
+
+Backend MUST:
+
+- Parse this response into structured JSON:
+
+{
+"recipes": [
+{
+"name": "...",
+"used": [...],
+"missing": [...]
+}
+]
+}
+
+- If parsing fails:
+  - Use fallback structured recipes
+  - NEVER return unstructured text
+
+---
+
+🍽️ 3. IMPROVE CUISINE INTELLIGENCE
+
+- Ensure cuisine is strictly respected
+- If cuisine = Indian → recipes must clearly be Indian
+- Add validation or fallback mapping:
+  - Italian → pasta-based
+  - Indian → curry/rice-based
+  - Chinese → stir-fry/noodle-based
+
+---
+
+📷 4. STABILIZE IMAGE INPUT FLOW
+
+- Keep fallback-first strategy:
+  - Always return ingredient list
+- Add editable field:
+  - User can modify detected ingredients before generating recipes
+
+Frontend must display:
+“Detected ingredients (approximate — you can edit)”
+
+---
+
+🎨 5. IMPROVE UI FOR DEMO IMPACT
+
+Update UI to clearly show:
+
+1. Cuisine selected
+2. Ingredients used
+3. Recipe cards:
+   - Recipe name
+   - Used ingredients
+   - Missing ingredients (highlighted)
+4. Sustainability message:
+
+“You reduced food waste by using available ingredients.”
+
+---
+
+⚡ 6. PERFORMANCE & RELIABILITY
+
+- Add loading states
+
+- Add error fallback UI:
+  “Using smart fallback recipes due to AI delay”
+
+- Ensure app never crashes even if:
+  
+  - AI API fails
+  - Image detection fails
+
+---
+
+🧪 7. DEMO MODE OPTIMIZATION
+
+Add a “Demo Mode” fallback:
+
+- Predefined high-quality responses for:
+  - Indian + rice
+  - Italian + tomato
+  - Chinese + noodles
+
+This ensures perfect demo even without API.
+
+---
+
+🧠 8. FINAL USER FLOW
+
+1. Upload image OR enter ingredients
+2. Select cuisine
+3. Click generate
+4. View:
+   - Ingredients
+   - Recipes
+   - Missing ingredients
+   - Sustainability message
+
+Flow must be smooth and under 5 seconds.
+
+---
+
+🏁 FINAL REQUIREMENT
+
+The system must:
+
+- Always return structured data
+- Always show cuisine-specific results
+- Always display missing ingredients clearly
+- Never fail during demo
+- Feel like a real product, not a prototype
+
+---
+
+Ensure clean code, readable components, and proper separation between frontend and backend logic.

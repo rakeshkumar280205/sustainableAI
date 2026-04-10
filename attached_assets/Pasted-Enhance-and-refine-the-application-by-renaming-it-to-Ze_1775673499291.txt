@@ -1,0 +1,142 @@
+Enhance and refine the application by renaming it to “ZeroPlate Chef” and optimizing it as a clean, hackathon-winning AI product focused on sustainability and food waste reduction.
+
+---
+
+🎯 PRIMARY GOAL
+
+Transform the app into a polished product:
+
+From:
+“A recipe generator”
+
+To:
+“ZeroPlate Chef — a smart AI assistant that reduces food waste by helping users cook with what they already have.”
+
+---
+
+🏷️ BRANDING UPDATE
+
+- Rename all references of the app to: ZeroPlate Chef
+- Update:
+  - App title
+  - Navbar/header
+  - Page headings
+  - Any metadata or labels
+
+Ensure consistent branding across frontend and backend responses.
+
+---
+
+🌱 1. ADD FOOD WASTE IMPACT VISIBILITY
+
+After generating recipes, display a sustainability insight:
+
+Examples:
+
+- “You used 3 available ingredients and avoided potential food waste.”
+- “Approx. 150–300g of food saved from being wasted.”
+
+This should be visually highlighted using a green theme or banner.
+
+---
+
+🧠 2. ADD SMART INSIGHT LINE
+
+Below recipe results, display a contextual insight:
+
+Examples:
+
+- “These recipes maximize usage of your available ingredients.”
+- “Only a few additional ingredients needed — efficient cooking!”
+- “You can cook without unnecessary purchases.”
+
+---
+
+🎨 3. IMPROVE RESULT PRESENTATION
+
+Each recipe card must clearly show:
+
+- Recipe Name
+- Ingredients Used (green badges)
+- Missing Ingredients (amber badges)
+
+Optional:
+
+- Tag: “Uses most of your ingredients”
+
+---
+
+⚡ 4. ADD QUICK ACTION UX
+
+Enhance usability with:
+
+- “Edit ingredients” option after detection
+- “Try another cuisine” button
+- “Regenerate recipes” button
+
+---
+
+📷 5. IMAGE INPUT EXPERIENCE
+
+Ensure:
+
+- Display:
+  “Detected ingredients (approximate — you can edit)”
+- Allow users to modify ingredients before generating recipes
+- Always use fallback-safe detection logic (never fail)
+
+---
+
+🔄 6. REMOVE SYSTEM / ONLINE MODE REFERENCES
+
+- Remove any references such as:
+  - “System mode”
+  - “Online mode”
+  - “AI status indicators”
+
+The app should feel seamless and product-like without exposing internal system states.
+
+---
+
+⚡ 7. PERFORMANCE & RELIABILITY
+
+- Maintain:
+  
+  - Fast response (<5 seconds)
+  - Loading indicators
+  - Error-safe fallback responses
+
+- Ensure:
+  
+  - App never crashes
+  - Recipes always generate (fallback if needed)
+
+---
+
+🧪 8. FINAL DEMO FLOW
+
+Ensure this exact flow is smooth:
+
+1. Upload image OR enter ingredients
+2. Edit detected ingredients (if needed)
+3. Select cuisine
+4. Click generate
+5. View:
+   - Recipes
+   - Ingredients used
+   - Missing ingredients
+   - Sustainability insight
+
+---
+
+🏁 FINAL REQUIREMENT
+
+The application must:
+
+- Feel like a real consumer product
+- Clearly communicate sustainability impact
+- Maintain consistent branding as “ZeroPlate Chef”
+- Avoid technical/system-level messaging
+- Deliver a clean, reliable, and impressive demo experience
+
+Ensure no breaking changes to existing working features.

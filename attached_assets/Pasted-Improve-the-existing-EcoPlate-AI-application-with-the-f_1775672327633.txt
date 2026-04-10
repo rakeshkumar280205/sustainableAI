@@ -1,0 +1,135 @@
+Improve the existing EcoPlate AI application with the following enhancements and fixes.
+
+---
+
+🎯 Feature 1: Cuisine-Based Recipe Suggestions
+
+Add a new input field in the frontend where the user can select or enter a cuisine type (e.g., Indian, Italian, Chinese).
+
+Update backend logic to include cuisine in the AI prompt.
+
+Updated Prompt Format:
+
+“Suggest 2 {cuisine} recipes using these ingredients: {ingredients}. Also list missing ingredients clearly.”
+
+Ensure the response reflects cuisine-specific dishes.
+
+---
+
+🧠 Feature 2: Proper Missing Ingredients Extraction
+
+Currently missing ingredients are not shown correctly.
+
+Fix this by:
+
+1. Ensuring AI response explicitly includes a section:
+   “Missing Ingredients: …”
+
+2. Post-process the AI response in backend:
+   
+   - Extract missing ingredients into a separate list
+   - Return structured JSON:
+
+{
+"recipes": "...",
+"missing": ["butter", "cheese"]
+}
+
+If extraction fails, return raw text but still include a "missing" field.
+
+---
+
+📷 Feature 3: Fix Image Ingredient Detection (IMPORTANT)
+
+Current issue: Image detection is not working.
+
+Implement a fallback-first approach:
+
+Step 1 (Primary):
+
+Attempt image processing using Hugging Face image model (if available)
+
+Step 2 (Fallback - MUST WORK):
+
+If detection fails:
+Return mock ingredients such as:
+"milk, tomato, onion, cheese"
+
+Ensure the app NEVER breaks due to image failure.
+
+Also display:
+“Detected ingredients (approximate)” in frontend.
+
+---
+
+🔄 Backend Changes
+
+- Update API request format:
+
+{
+"ingredients": "milk, bread",
+"cuisine": "Indian"
+}
+
+- Update endpoint logic to:
+  - Accept cuisine
+  - Pass cuisine into AI prompt
+  - Return structured response
+
+---
+
+🎨 Frontend Changes
+
+1. Add cuisine input dropdown or text field
+2. Display:
+   - Selected cuisine
+   - Detected ingredients
+   - Recipes
+   - Missing ingredients
+3. Improve UI layout:
+   - Use cards for recipes
+   - Highlight missing ingredients
+
+---
+
+⚠️ Reliability Requirements
+
+- App must NOT fail if:
+  
+  - AI API is slow or fails
+  - Image detection fails
+
+- Always return fallback response:
+  Example:
+  Recipe: Vegetable Stir Fry
+  Missing: soy sauce, garlic
+
+---
+
+🧪 Final Expected Behavior
+
+User flow:
+
+1. Upload image OR enter ingredients
+2. Select cuisine (e.g., Italian)
+3. Click generate
+
+System outputs:
+
+- Ingredients detected
+- Cuisine-specific recipes
+- Missing ingredients list
+- Sustainability message
+
+---
+
+🏁 Goal
+
+Make the system:
+
+- Reliable
+- Structured
+- Cuisine-aware
+- Demo-ready for hackathon
+
+Ensure clean code and proper separation of concerns.
