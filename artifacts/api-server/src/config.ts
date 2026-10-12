@@ -33,12 +33,35 @@ interface Config {
     isDevelopment: boolean;
     corsOrigins: string[];
     mongodbUri: string | null;
-    openaiBaseUrl: string | null;
-    openaiApiKey: string | null;
+    geminiApiKey: string;
     huggingfaceApiKey: string | null;
+    hfFreeOnlyEnabled: boolean;
+    openrouterApiKey: string | null;
+    ollamaBaseUrl: string;
+    ollamaModel: string;
+    ollamaVisionModel: string;
+    ollamaEnabled: boolean;
+    ollamaTimeoutMs: number;
     internalApiKey: string | null;
-    hasOpenAI: boolean;
+    hasGemini: boolean;
     hasHuggingFace: boolean;
+    hasOpenRouter: boolean;
+    hasOllama: boolean;
+    aiStrictMode: boolean;
+}
+
+function parseBooleanEnv(value: string | undefined, fallback = false): boolean {
+    if (value === undefined) return fallback;
+    const normalized = value.trim().toLowerCase();
+    if (["1", "true", "yes", "on"].includes(normalized)) return true;
+    if (["0", "false", "no", "off"].includes(normalized)) return false;
+    return fallback;
+}
+
+function parseBoundedMilliseconds(value: string | undefined, fallback: number, maximum: number): number {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+    return Math.min(Math.floor(parsed), maximum);
 }
 
 function getEnvironmentVariable(key: string): string | undefined {
@@ -74,22 +97,18 @@ function loadConfig(): Config {
     const isProduction = nodeEnv === "production";
     const isDevelopment = nodeEnv === "development";
 
-    // CORS Origins - allow frontend and localhost
-    let corsOrigins: string[] = [
-        "http://localhost:3000",      // local backend for frontend
-        "http://localhost:5173",      // local vite frontend
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:5173",
-    ];
-
-    // Add production origins if specified
+    // CORS origins are local-only by default in development and explicit in production.
     const productionOrigins = getEnvironmentVariable("CORS_ORIGINS");
-    if (productionOrigins && isProduction) {
-        corsOrigins = [
-            ...corsOrigins,
-            ...productionOrigins.split(",").map((o) => o.trim()),
+    const corsOrigins = isProduction
+        ? (productionOrigins
+            ? productionOrigins.split(",").map((o) => o.trim()).filter(Boolean)
+            : [])
+        : [
+            "http://localhost:3000",
+            "http://localhost:5173",
+            "http://127.0.0.1:3000",
+            "http://127.0.0.1:5173",
         ];
-    }
 
     // LOG_LEVEL - with default to info
     const logLevel = getEnvironmentVariable("LOG_LEVEL") || "info";
@@ -100,28 +119,47 @@ function loadConfig(): Config {
         emitConfigWarning("MONGODB_URI not set in production. Database operations may fail.");
     }
 
-    // OpenAI configuration - support both old and new naming conventions
-    const openaiApiKey =
-        getEnvironmentVariable("OPENAI_API_KEY") ||
-        getEnvironmentVariable("AI_INTEGRATIONS_OPENAI_API_KEY") ||
-        null;
-
-    const openaiBaseUrl =
-        getEnvironmentVariable("OPENAI_BASE_URL") ||
-        getEnvironmentVariable("AI_INTEGRATIONS_OPENAI_BASE_URL") ||
-        null;
-
-    if (!openaiApiKey) {
-        emitConfigWarning("OPENAI_API_KEY not set. OpenAI vision features will be unavailable.");
-    }
+    const geminiApiKey = getEnvironmentVariable("GEMINI_API_KEY") || "";
 
     // HuggingFace configuration
     const huggingfaceApiKey =
         getEnvironmentVariable("HUGGINGFACE_API_KEY") ||
         null;
+    const hfFreeOnlyEnabled = parseBooleanEnv(getEnvironmentVariable("HF_FREE_ONLY_ENABLED"), false);
 
     if (!huggingfaceApiKey) {
         emitConfigWarning("HUGGINGFACE_API_KEY not set. HuggingFace fallback will be unavailable.");
+    } else if (!hfFreeOnlyEnabled) {
+        emitConfigWarning("HF_FREE_ONLY_ENABLED is false. HuggingFace fallback is disabled.");
+    }
+
+    const openrouterApiKey = getEnvironmentVariable("OPENROUTER_API_KEY") || null;
+    if (!openrouterApiKey) {
+        emitConfigWarning("OPENROUTER_API_KEY not set. OpenRouter free routing will be unavailable.");
+    }
+
+    const ollamaEnabled = parseBooleanEnv(getEnvironmentVariable("OLLAMA_ENABLED"), false);
+    const ollamaBaseUrl = getEnvironmentVariable("OLLAMA_BASE_URL") || "http://127.0.0.1:11434";
+    const ollamaTextModel = getEnvironmentVariable("OLLAMA_TEXT_MODEL") || getEnvironmentVariable("OLLAMA_MODEL") || "qwen2.5vl:3b";
+    const ollamaVisionModel = getEnvironmentVariable("OLLAMA_VISION_MODEL") || "qwen2.5vl:3b";
+    const ollamaTimeoutMs = parseBoundedMilliseconds(
+        getEnvironmentVariable("OLLAMA_TIMEOUT_MS"),
+        120_000,
+        120_000,
+    );
+    let safeOllamaBaseUrl = "http://127.0.0.1:11434";
+    let ollamaUrlValid = false;
+    try {
+        const parsedOllamaUrl = new URL(ollamaBaseUrl);
+        const allowedLocalHosts = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+        if (parsedOllamaUrl.protocol === "http:" && allowedLocalHosts.has(parsedOllamaUrl.hostname)) {
+            safeOllamaBaseUrl = parsedOllamaUrl.origin;
+            ollamaUrlValid = true;
+        } else if (ollamaEnabled) {
+            emitConfigWarning("OLLAMA_BASE_URL must target the local loopback host. Ollama is disabled.");
+        }
+    } catch {
+        if (ollamaEnabled) emitConfigWarning("Invalid OLLAMA_BASE_URL. Ollama is disabled.");
     }
 
     const internalApiKey = getEnvironmentVariable("INTERNAL_API_KEY") || null;
@@ -129,8 +167,11 @@ function loadConfig(): Config {
         emitConfigWarning("INTERNAL_API_KEY not set in production. Protected routes will reject requests.");
     }
 
-    const hasOpenAI = !!openaiApiKey;
-    const hasHuggingFace = !!huggingfaceApiKey;
+    const hasGemini = geminiApiKey.length > 0;
+    const hasHuggingFace = !!huggingfaceApiKey && hfFreeOnlyEnabled;
+    const hasOpenRouter = !!openrouterApiKey;
+    const hasOllama = ollamaEnabled && ollamaUrlValid && !!ollamaTextModel;
+    const aiStrictMode = parseBooleanEnv(getEnvironmentVariable("AI_STRICT_MODE"), false);
 
     return {
         port,
@@ -140,12 +181,21 @@ function loadConfig(): Config {
         isDevelopment,
         corsOrigins,
         mongodbUri,
-        openaiBaseUrl,
-        openaiApiKey,
+        geminiApiKey,
         huggingfaceApiKey,
+        hfFreeOnlyEnabled,
+        openrouterApiKey,
+        ollamaBaseUrl: safeOllamaBaseUrl,
+        ollamaModel: ollamaTextModel,
+        ollamaVisionModel,
+        ollamaEnabled,
+        ollamaTimeoutMs,
         internalApiKey,
-        hasOpenAI,
+        hasGemini,
         hasHuggingFace,
+        hasOpenRouter,
+        hasOllama,
+        aiStrictMode,
     };
 }
 

@@ -18,7 +18,10 @@ export function errorHandler(
   _next: NextFunction
 ): void {
   const status = err.status ?? 500;
-  const message = err.message ?? "An unexpected error occurred. Please try again.";
+  const message =
+    status >= 500
+      ? "An unexpected error occurred. Please try again."
+      : err.message ?? "Request failed.";
 
   logger.error({ err, status }, "Unhandled request error");
 
@@ -27,7 +30,7 @@ export function errorHandler(
     data: null,
     error: {
       message,
-      ...(config.isDevelopment && err.stack
+      ...(config.isDevelopment && status < 500 && err.stack
         ? { details: err.stack }
         : {}),
     },

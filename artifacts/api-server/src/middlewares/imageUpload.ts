@@ -9,6 +9,9 @@ import multer from "multer";
 
 const ALLOWED_MIME_TYPES = ["image/jpeg", "image/png", "image/webp"];
 const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
+const MAX_FIELD_COUNT = 10;
+const MAX_FIELD_NAME_SIZE = 100;
+const MAX_FIELD_VALUE_SIZE = 1024;
 
 export function isValidImageBuffer(buffer: Buffer): boolean {
     if (buffer.length < 12) {
@@ -52,5 +55,9 @@ export const imageUpload = multer({
     fileFilter: imageUploadFilter,
     limits: {
         fileSize: MAX_FILE_SIZE,
+        fields: MAX_FIELD_COUNT,
+        fieldNameSize: MAX_FIELD_NAME_SIZE,
+        fieldSize: MAX_FIELD_VALUE_SIZE,
+        parts: MAX_FIELD_COUNT + 1,
     },
 });

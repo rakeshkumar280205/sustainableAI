@@ -169,13 +169,16 @@ components:
         ai:
           type: object
           properties:
-            openai:
+            openrouter:
               type: string
             huggingface:
               type: string
+            ollama:
+              type: string
           required:
-            - openai
+            - openrouter
             - huggingface
+            - ollama
       required:
         - status
         - timestamp
@@ -270,6 +273,8 @@ components:
           type: number
         cacheHit:
           type: boolean
+        low_confidence:
+          type: boolean
       required:
         - recipes
         - sustainabilityMessage
@@ -314,6 +319,8 @@ components:
           type: boolean
         provider:
           type: string
+        low_confidence:
+          type: boolean
       required:
         - ingredients
         - confidence

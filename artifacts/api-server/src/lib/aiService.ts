@@ -1,25 +1,35 @@
-import OpenAI from "openai";
 import { z } from "zod";
 import { logger } from "./logger.js";
 import config from "../config.js";
+import {
+  analyzeWithOllama,
+  generateWithHuggingFace as generateWithHuggingFaceProvider,
+  generateWithOllama,
+  generateWithOpenRouter,
+} from "./providerAdapters.js";
 
 // ─── TYPES ───────────────────────────────────────────────────────────────────
 
 export enum AIProvider {
-  OpenAI = "openai",
+  OpenRouter = "openrouter",
+  Ollama = "ollama",
+  Gemini = "gemini",
   HuggingFace = "huggingface",
   Fallback = "fallback",
 }
 
-// ─── OPENAI CLIENT (vision + text) ────────────────────────────────────────────
+const GEMINI_MODEL = "gemini-3.8-flash";
+const GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
+const GEMINI_TIMEOUT_MS = readPositiveMs(process.env.GEMINI_TIMEOUT_MS, 20000);
+const GEMINI_MAX_RETRIES = 2;
+const HUGGINGFACE_RECIPE_TIMEOUT_MS = readPositiveMs(process.env.HUGGINGFACE_RECIPE_TIMEOUT_MS, 15000);
+const CACHE_AI_RESPONSES = process.env.CACHE_AI_RESPONSES === "true";
+const HUGGINGFACE_API_BASE_URL = process.env.HUGGINGFACE_API_BASE_URL || "https://router.huggingface.co/hf-inference/models";
 
-function getOpenAIClient(): OpenAI | null {
-  if (!config.openaiApiKey) return null;
-  return new OpenAI({
-    apiKey: config.openaiApiKey,
-    ...(config.openaiBaseUrl && { baseURL: config.openaiBaseUrl }),
-  });
-}
+const HUGGINGFACE_RECIPE_MODELS = readCsvEnv(
+  process.env.HUGGINGFACE_RECIPE_MODELS,
+  ["mistralai/Mistral-7B-Instruct-v0.2", "Qwen/Qwen2.5-7B-Instruct"]
+);
 
 // ─── TIMEOUT HELPER ──────────────────────────────────────────────────────────
 
@@ -30,6 +40,29 @@ function timeoutAfter(milliseconds: number): Promise<never> {
       milliseconds
     );
   });
+}
+
+function readPositiveMs(envValue: string | undefined, fallbackMs: number): number {
+  const parsed = Number(envValue);
+  if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  return fallbackMs;
+}
+
+function readCsvEnv(envValue: string | undefined, fallback: string[]): string[] {
+  if (!envValue?.trim()) return fallback;
+  const values = envValue
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return values.length > 0 ? values : fallback;
+}
+
+const HUGGINGFACE_IMAGE_TIMEOUT_MS = readPositiveMs(process.env.HUGGINGFACE_IMAGE_TIMEOUT_MS, 15000);
+const HUGGINGFACE_IMAGE_MODEL = process.env.HUGGINGFACE_IMAGE_MODEL || "Salesforce/blip-image-captioning-base";
+const HUGGINGFACE_IMAGE_API_URL = `${HUGGINGFACE_API_BASE_URL}/${HUGGINGFACE_IMAGE_MODEL}`;
+
+function getHuggingFaceModelUrl(modelName: string): string {
+  return `${HUGGINGFACE_API_BASE_URL}/${modelName}`;
 }
 
 export interface Recipe {
@@ -52,6 +85,7 @@ export interface RecipeSuggestion {
   provider: AIProvider;
   confidence?: number; // 0-1
   cacheHit?: boolean;
+  low_confidence?: boolean;
 }
 
 export interface IngredientDetectionResult {
@@ -59,6 +93,122 @@ export interface IngredientDetectionResult {
   confidence: number; // 0-1
   isApproximate: boolean;
   provider: AIProvider;
+  low_confidence?: boolean;
+}
+
+type HostedTextProvider = (request: {
+  prompt: string;
+  requestId?: string;
+}) => Promise<string | null>;
+
+let totalRecipeRequests = 0;
+let totalRecipeFallbacks = 0;
+
+function getFallbackUsageRate(): number {
+  if (totalRecipeRequests === 0) return 0;
+  return totalRecipeFallbacks / totalRecipeRequests;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+const GEMINI_RETRYABLE_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
+
+function getGeminiRetryDelay(response: Response, attempt: number): number {
+  const retryAfter = response.headers.get("retry-after");
+  if (retryAfter) {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds) && seconds >= 0) {
+      return Math.min(5_000, seconds * 1_000);
+    }
+
+    const retryAt = Date.parse(retryAfter);
+    if (Number.isFinite(retryAt)) {
+      return Math.min(5_000, Math.max(0, retryAt - Date.now()));
+    }
+  }
+
+  const exponentialDelay = 250 * Math.pow(2, attempt);
+  const jitter = Math.floor(Math.random() * 100);
+  return Math.min(5_000, exponentialDelay + jitter);
+}
+
+function classifyGeminiError(status: number): string {
+  if (status === 400) return "invalid_request";
+  if (status === 401) return "authentication";
+  if (status === 403) return "permission_or_quota";
+  if (status === 404) return "model_or_endpoint_not_found";
+  if (status === 408 || status === 504) return "timeout";
+  if (status === 429) return "rate_or_quota_limit";
+  if (status >= 500) return "service_unavailable";
+  return "provider_error";
+}
+
+function summarizeGeminiError(body: string, status: number): {
+  classification: string;
+  errorCode?: string;
+  providerStatus?: string;
+} {
+  try {
+    const parsed = JSON.parse(body) as {
+      error?: {
+        code?: number | string;
+        status?: string;
+      };
+    };
+    const code = parsed.error?.code;
+    return {
+      classification: classifyGeminiError(status),
+      ...(code !== undefined ? { errorCode: String(code) } : {}),
+      ...(parsed.error?.status ? { providerStatus: parsed.error.status } : {}),
+    };
+  } catch {
+    return { classification: classifyGeminiError(status) };
+  }
+}
+
+async function fetchGeminiRequest(
+  input: string | URL,
+  init?: RequestInit,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
+
+  try {
+    return await fetch(input, {
+      ...init,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function computeCoveragePercent(used: string[], ingredientList: string[]): number {
+  if (!ingredientList.length) return 0;
+  const usedSet = new Set(used.map((item) => item.trim().toLowerCase()));
+  const matchCount = ingredientList.filter((item) => usedSet.has(item)).length;
+  return (matchCount / ingredientList.length) * 100;
+}
+
+function computeWasteReductionScore(coveragePercent: number, missingCount: number, stepCount: number): number {
+  const missingPenalty = missingCount * 10;
+  const complexityPenalty = Math.max(0, stepCount - 6) * 3;
+  const score = coveragePercent - missingPenalty - complexityPenalty;
+  return Math.max(0, Math.min(100, Math.round(score)));
+}
+
+function inferCookTimeFromSteps(stepCount: number): string {
+  const minutes = Math.max(10, Math.min(90, 8 + stepCount * 6));
+  return `${minutes} minutes`;
+}
+
+function inferDifficulty(stepCount: number, missingCount: number): string {
+  const complexity = stepCount + missingCount;
+  if (complexity <= 6) return "easy";
+  if (complexity <= 12) return "medium";
+  return "hard";
 }
 
 // ─── RESILIENCE LAYER (CACHE + CIRCUIT BREAKER) ───────────────────────────
@@ -85,10 +235,18 @@ function recordAISuccess(): void {
 }
 
 function normalizeIngredientList(input: string): string[] {
+  const aliasMap: Record<string, string> = {
+    "spring onions": "green onion",
+    "scallions": "green onion",
+    "chilli": "chili",
+    "bell pepper": "capsicum",
+  };
+
   const seen = new Set<string>();
   return input
     .split(",")
     .map((i) => i.trim().toLowerCase())
+    .map((item) => aliasMap[item] ?? item)
     .filter(Boolean)
     .filter((item) => {
       if (seen.has(item)) return false;
@@ -119,8 +277,13 @@ function getCachedRecipeSuggestion(cacheKey: string): RecipeSuggestion | null {
     return null;
   }
 
+  if (!entry.value.isFallback && !CACHE_AI_RESPONSES) {
+    return null;
+  }
+
   const cloned = cloneRecipeSuggestion(entry.value);
   cloned.cacheHit = true;
+  cloned.low_confidence = cloned.isFallback;
   return cloned;
 }
 
@@ -190,7 +353,7 @@ function withEfficiency(
   return scored;
 }
 
-const OpenAIRecipeSchema = z.object({
+const GeminiRecipeSchema = z.object({
   recipes: z
     .array(
       z.object({
@@ -205,6 +368,27 @@ const OpenAIRecipeSchema = z.object({
     )
     .min(1)
     .max(2),
+});
+
+const GeminiRecipeStrictSchema = z.object({
+  recipes: z
+    .array(
+      z.object({
+        name: z.string().min(1),
+        used_ingredients: z.array(z.string()).default([]),
+        missing_ingredients: z.array(z.string()).default([]),
+        steps: z.array(z.string()).min(1),
+        cook_time_minutes: z.number().int().min(5).max(240),
+        difficulty: z.enum(["easy", "medium", "hard"]),
+        waste_reduction_score: z.number().min(0).max(100),
+      })
+    )
+    .min(1)
+    .max(2),
+});
+
+const GeminiIngredientsStrictSchema = z.object({
+  ingredients: z.array(z.string()).min(1),
 });
 
 // ─── FALLBACK RECIPES & DEMO MODE ──────────────────────────────────────────
@@ -492,6 +676,7 @@ function generateFallbackResponse(
       isFallback: provider === AIProvider.Fallback,
       provider,
       confidence: 0.9,
+      low_confidence: provider === AIProvider.Fallback,
     };
   }
 
@@ -509,6 +694,7 @@ function generateFallbackResponse(
     isFallback: provider === AIProvider.Fallback,
     provider,
     confidence: provider === AIProvider.Fallback ? 0.6 : 0.8,
+    low_confidence: provider === AIProvider.Fallback,
   };
 }
 
@@ -549,12 +735,15 @@ function parseAIRecipeResponse(
     // Recipe name line
     if (/^recipe\s*\d+\s*:/i.test(line) || (/^(name|title)\s*:/i.test(line) && !currentRecipe?.name)) {
       if (currentRecipe?.name) {
+        const instructionText = currentRecipe.instructions || "";
+        const stepCount = instructionText.split(/\n|\.|;/).map((s) => s.trim()).filter(Boolean).length;
+        const missingCount = (currentRecipe.missing || []).length;
         recipes.push({
           name: currentRecipe.name || "Recipe",
           description: currentRecipe.description || "",
-          instructions: currentRecipe.instructions || "",
-          cookTime: currentRecipe.cookTime || "30 minutes",
-          difficulty: currentRecipe.difficulty || "Medium",
+          instructions: instructionText,
+          cookTime: currentRecipe.cookTime || inferCookTimeFromSteps(stepCount),
+          difficulty: (currentRecipe.difficulty || inferDifficulty(stepCount, missingCount)).toLowerCase(),
           used: currentRecipe.used || [],
           missing: currentRecipe.missing || [],
         });
@@ -608,12 +797,15 @@ function parseAIRecipeResponse(
 
   // Push last recipe
   if (currentRecipe?.name) {
+    const instructionText = currentRecipe.instructions || "";
+    const stepCount = instructionText.split(/\n|\.|;/).map((s) => s.trim()).filter(Boolean).length;
+    const missingCount = (currentRecipe.missing || []).length;
     recipes.push({
       name: currentRecipe.name,
       description: currentRecipe.description || "",
-      instructions: currentRecipe.instructions || "",
-      cookTime: currentRecipe.cookTime || "30 minutes",
-      difficulty: currentRecipe.difficulty || "Medium",
+      instructions: instructionText,
+      cookTime: currentRecipe.cookTime || inferCookTimeFromSteps(stepCount),
+      difficulty: (currentRecipe.difficulty || inferDifficulty(stepCount, missingCount)).toLowerCase(),
       used: currentRecipe.used || [],
       missing: currentRecipe.missing || [],
     });
@@ -623,10 +815,230 @@ function parseAIRecipeResponse(
   return withEfficiency(limited, ingredientList, cuisine);
 }
 
-/**
- * Generate recipes using OpenAI GPT (PRIMARY)
- */
-async function generateWithOpenAIGPT(
+function safeJsonParse(text: string): unknown {
+  try {
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return null;
+    return JSON.parse(jsonMatch[0]);
+  } catch {
+    return null;
+  }
+}
+
+export async function generateWithGemini(prompt: string, requestId?: string): Promise<string | null> {
+  if (!config.geminiApiKey) {
+    logger.warn({ requestId, provider: "gemini" }, "Gemini API key unavailable");
+    return null;
+  }
+
+  for (let attempt = 0; attempt <= GEMINI_MAX_RETRIES; attempt += 1) {
+    try {
+      logger.info(
+        {
+          requestId,
+          provider: "gemini",
+          model: GEMINI_MODEL,
+          attempt,
+          timeoutMs: GEMINI_TIMEOUT_MS,
+        },
+        "Calling Gemini chat completions"
+      );
+
+      const response = await Promise.race([
+        fetchGeminiRequest(GEMINI_API_URL, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${config.geminiApiKey}`,
+            "Content-Type": "application/json",
+            "HTTP-Referer": "http://localhost:3000",
+            "X-Gemini-Title": "ZeroPlate Chef",
+          },
+          body: JSON.stringify({
+            model: GEMINI_MODEL,
+            messages: [
+              {
+                role: "user",
+                content: prompt,
+              },
+            ],
+            temperature: 0.7,
+            max_tokens: 800,
+          }),
+        }),
+        timeoutAfter(GEMINI_TIMEOUT_MS),
+      ]);
+
+      if (!response.ok) {
+        const body = await response.text();
+        logger.warn(
+          {
+            requestId,
+            provider: "gemini",
+            model: GEMINI_MODEL,
+            attempt,
+            status: response.status,
+            responseBodyPresent: body.length > 0,
+            ...summarizeGeminiError(body, response.status),
+          },
+          "Gemini request returned non-OK response"
+        );
+
+        if (GEMINI_RETRYABLE_STATUSES.has(response.status) && attempt < GEMINI_MAX_RETRIES) {
+          await delay(getGeminiRetryDelay(response, attempt));
+          continue;
+        }
+        return null;
+      }
+
+      const data = (await response.json()) as {
+        choices?: Array<{ message?: { content?: string } }>;
+      };
+
+      const content = data.choices?.[0]?.message?.content?.trim() ?? "";
+      if (!content) {
+        logger.warn(
+          {
+            requestId,
+            provider: "gemini",
+            model: GEMINI_MODEL,
+            attempt,
+            reason: "empty_content",
+          },
+          "Gemini response content was empty"
+        );
+        if (attempt < GEMINI_MAX_RETRIES) {
+          await delay(250 * Math.pow(2, attempt));
+        }
+        continue;
+      }
+
+      return content;
+    } catch (err) {
+      const isLastAttempt = attempt >= GEMINI_MAX_RETRIES;
+      logger.warn(
+        {
+          requestId,
+          provider: "gemini",
+          model: GEMINI_MODEL,
+          attempt,
+          retrying: !isLastAttempt,
+          errorType: err instanceof Error ? err.name : "UnknownError",
+        },
+        "Gemini request attempt failed"
+      );
+
+      if (!isLastAttempt) {
+        await delay(250 * Math.pow(2, attempt));
+      }
+    }
+  }
+
+  return null;
+}
+
+export async function testGeminiConnection(requestId?: string): Promise<{
+  working: boolean;
+  model: string;
+  error?: string;
+}> {
+  const modelName = GEMINI_MODEL;
+
+  if (!config.geminiApiKey) {
+    const error = "GEMINI_API_KEY missing in environment";
+    logger.warn({ requestId, provider: "gemini", model: modelName, error }, "Gemini health check failed before request");
+    return { working: false, model: modelName, error };
+  }
+
+  const raw = await generateWithGemini("Say hello", requestId);
+  if (!raw) {
+    const error = "Gemini returned empty or failed response";
+    return { working: false, model: modelName, error };
+  }
+
+  logger.info(
+    { requestId, provider: "gemini", model: modelName, responseReceived: true },
+    "Gemini connectivity test succeeded"
+  );
+
+  return { working: true, model: modelName };
+}
+
+export async function testHuggingFaceConnection(requestId?: string): Promise<{
+  working: boolean;
+  model?: string;
+  error?: string;
+}> {
+  if (!config.hfFreeOnlyEnabled) {
+    const error = "HF_FREE_ONLY_ENABLED is false";
+    logger.info({ requestId, provider: "huggingface" }, "HuggingFace health check skipped");
+    return { working: false, error };
+  }
+
+  if (!config.huggingfaceApiKey) {
+    const error = "HUGGINGFACE_API_KEY missing in environment";
+    logger.warn({ requestId, provider: "huggingface", error }, "HuggingFace health check failed before request");
+    return { working: false, error };
+  }
+
+  let lastError = "unknown HuggingFace error";
+
+  for (const modelName of HUGGINGFACE_RECIPE_MODELS) {
+    const endpoint = getHuggingFaceModelUrl(modelName);
+    try {
+      const response = await Promise.race([
+        fetch(endpoint, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${config.huggingfaceApiKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            inputs: "Say hello",
+            parameters: {
+              max_new_tokens: 700,
+              temperature: 0.7,
+              return_full_text: false,
+            },
+          }),
+        }),
+        timeoutAfter(HUGGINGFACE_RECIPE_TIMEOUT_MS),
+      ]);
+
+      if (!response.ok) {
+        const body = await response.text();
+        lastError = `status=${response.status}`;
+        logger.warn(
+          {
+            requestId,
+            provider: "huggingface",
+            model: modelName,
+            status: response.status,
+            responseBodyPresent: body.length > 0,
+          },
+          "HuggingFace connectivity test returned non-OK response"
+        );
+        continue;
+      }
+
+      logger.info(
+        { requestId, provider: "huggingface", model: modelName, status: response.status },
+        "HuggingFace connectivity test succeeded"
+      );
+      return { working: true, model: modelName };
+    } catch (err) {
+      const errorMessage = err instanceof Error ? `${err.message}${err.stack ? `\n${err.stack}` : ""}` : String(err);
+      lastError = errorMessage;
+      logger.warn(
+        { requestId, provider: "huggingface", model: modelName, error: errorMessage },
+        "HuggingFace connectivity test failed"
+      );
+    }
+  }
+
+  return { working: false, error: lastError };
+}
+
+async function generateWithGeminiRecipes(
   ingredients: string,
   cuisine: string | null | undefined,
   requestId?: string
@@ -634,106 +1046,131 @@ async function generateWithOpenAIGPT(
   recipes: Recipe[];
   confidence: number;
 } | null> {
-  const client = getOpenAIClient();
-  if (!client) return null;
+  if (!config.geminiApiKey) {
+    logger.warn({ requestId, provider: "gemini" }, "Gemini API key unavailable for recipe generation");
+    return null;
+  }
 
   try {
     const ingredientList = normalizeIngredientList(ingredients);
+    const prompt = `You are a professional chef focused on sustainability and minimizing food waste.
 
-    const prompt = cuisine
-      ? `You are a professional chef. Available ingredients: ${ingredients}. Cuisine: ${cuisine}. Generate exactly 2 realistic recipes using available ingredients first and list optional missing ingredients.`
-      : `You are a professional chef. Available ingredients: ${ingredients}. Generate exactly 2 realistic recipes using available ingredients first and list optional missing ingredients.`;
+Given ingredients: ${ingredientList.join(", ")}
 
-    const response = await Promise.race([
-      client.chat.completions.create({
-        model: "gpt-4o",
-        max_completion_tokens: 1024,
-        messages: [
-          {
-            role: "system",
-            content:
-              "Return valid JSON only. Follow the schema strictly. Do not include markdown.",
-          },
-          { role: "user", content: prompt },
-        ],
-        temperature: 0.7,
-        response_format: {
-          type: "json_schema",
-          json_schema: {
-            name: "recipe_suggestion",
-            strict: true,
-            schema: {
-              type: "object",
-              additionalProperties: false,
-              properties: {
-                recipes: {
-                  type: "array",
-                  minItems: 1,
-                  maxItems: 2,
-                  items: {
-                    type: "object",
-                    additionalProperties: false,
-                    properties: {
-                      name: { type: "string" },
-                      description: { type: "string" },
-                      instructions: { type: "string" },
-                      cookTime: { type: "string" },
-                      difficulty: { type: "string" },
-                      used: {
-                        type: "array",
-                        items: { type: "string" },
-                      },
-                      missing: {
-                        type: "array",
-                        items: { type: "string" },
-                      },
-                    },
-                    required: [
-                      "name",
-                      "description",
-                      "instructions",
-                      "cookTime",
-                      "difficulty",
-                      "used",
-                      "missing",
-                    ],
-                  },
-                },
-              },
-              required: ["recipes"],
-            },
-          },
-        },
-      }),
-      timeoutAfter(4000),
-    ]);
+Cuisine: ${cuisine ?? "any"}
 
-    const rawJson = response.choices[0]?.message?.content?.trim() ?? "";
-    if (!rawJson) return null;
+Generate exactly 2 recipes.
 
-    const parsedJson = JSON.parse(rawJson) as unknown;
-    const parsed = OpenAIRecipeSchema.safeParse(parsedJson);
-    if (!parsed.success) {
-      logger.warn(
-        { requestId, provider: "openai", issues: parsed.error.issues },
-        "OpenAI structured response failed Zod validation"
+Rules:
+- Use at least 70% of provided ingredients
+- Maximum 3 additional ingredients allowed
+- Prefer common pantry items
+- Avoid unnecessary ingredients
+- Recipes must be realistic and cookable
+- Output ONLY JSON
+- No explanation text
+
+Format:
+{
+  "recipes": [
+    {
+      "name": "...",
+      "used_ingredients": [],
+      "missing_ingredients": [],
+      "steps": [],
+      "cook_time_minutes": 0,
+      "difficulty": "easy|medium|hard",
+      "waste_reduction_score": 0
+    }
+  ]
+}`;
+
+    for (let schemaAttempt = 0; schemaAttempt <= 1; schemaAttempt += 1) {
+      const text = await generateWithGemini(prompt, requestId);
+      if (!text) {
+        return null;
+      }
+
+      const parsed = safeJsonParse(text);
+      logger.info(
+        { requestId, provider: "gemini", model: GEMINI_MODEL, schemaAttempt, responseReceived: true, parsed: !!parsed },
+        "Gemini recipe output received"
       );
-      return null;
+
+      const strictParsed = GeminiRecipeStrictSchema.safeParse(parsed);
+      if (!strictParsed.success) {
+        logger.warn(
+          {
+            requestId,
+            provider: "gemini",
+            model: GEMINI_MODEL,
+            schemaAttempt,
+            reason: "invalid_json_structure",
+          },
+          "Gemini recipe response failed schema validation"
+        );
+        continue;
+      }
+
+      const mappedRecipes: Recipe[] = strictParsed.data.recipes.map((recipe) => ({
+        name: recipe.name,
+        description: recipe.steps[0] ?? "",
+        instructions: recipe.steps.join("\n"),
+        cookTime: `${recipe.cook_time_minutes} minutes`,
+        difficulty: recipe.difficulty,
+        used: recipe.used_ingredients,
+        missing: recipe.missing_ingredients,
+        efficiency: Math.max(recipe.waste_reduction_score, 0) / 100,
+      }));
+
+      const recipesWithScoring = mappedRecipes.map((recipe) => {
+        const stepCount = recipe.instructions.split("\n").filter(Boolean).length;
+        const coveragePercent = computeCoveragePercent(recipe.used, ingredientList);
+        const computedScore = computeWasteReductionScore(coveragePercent, recipe.missing.length, stepCount);
+        return {
+          ...recipe,
+          efficiency: computedScore / 100,
+        };
+      });
+
+      const recipes = withEfficiency(recipesWithScoring, ingredientList, cuisine);
+      if (recipes.length === 0) {
+        continue;
+      }
+
+      const hasLowCoverage = recipes.some(
+        (recipe) => computeCoveragePercent(recipe.used, ingredientList) < 40
+      );
+      if (hasLowCoverage) {
+        logger.warn(
+          { requestId, provider: "gemini", model: GEMINI_MODEL, reason: "coverage_below_threshold" },
+          "Gemini recipe coverage below threshold"
+        );
+        continue;
+      }
+
+      logger.info(
+        {
+          requestId,
+          providerUsed: "gemini",
+          model: GEMINI_MODEL,
+          recipeCount: recipes.length,
+          ingredientCoveragePct: Math.round(
+            recipes.reduce((acc, recipe) => acc + computeCoveragePercent(recipe.used, ingredientList), 0) /
+            recipes.length
+          ),
+        },
+        "Gemini generated recipes"
+      );
+
+      return { recipes, confidence: 0.95 };
     }
 
-    const recipes = withEfficiency(parsed.data.recipes, ingredientList, cuisine);
-    if (recipes.length === 0) return null;
-
-    logger.info(
-      { requestId, provider: "openai", recipeCount: recipes.length },
-      "OpenAI GPT generated recipes"
-    );
-
-    return { recipes, confidence: 0.95 };
+    return null;
   } catch (err) {
     logger.warn(
-      { requestId, provider: "openai", error: String(err) },
-      "OpenAI recipe generation failed"
+      { requestId, provider: "gemini", errorType: err instanceof Error ? err.name : "UnknownError" },
+      "Gemini recipe generation failed"
     );
     return null;
   }
@@ -753,77 +1190,235 @@ async function generateWithHuggingFace(
   if (!config.huggingfaceApiKey) return null;
 
   try {
+    logger.info(
+      {
+        requestId,
+        provider: "huggingface",
+        timeoutMs: HUGGINGFACE_RECIPE_TIMEOUT_MS,
+        models: HUGGINGFACE_RECIPE_MODELS,
+      },
+      "Entering HuggingFace Recipes"
+    );
+
     const ingredientList = ingredients
       .split(",")
       .map((i) => i.trim().toLowerCase())
       .filter(Boolean);
 
-    const prompt = cuisine
-      ? `Generate 2 ${cuisine} recipes using: ${ingredients}`
-      : `Generate 2 recipes using: ${ingredients}`;
+    const prompt = `You are a professional chef focused on sustainability and minimizing food waste.
 
-    const response = await Promise.race([
-      fetch(
-        "https://api-inference.huggingface.co/models/google/flan-t5-large",
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${config.huggingfaceApiKey}`,
-            "Content-Type": "application/json",
+Ingredients: ${ingredientList.join(", ")}
+Cuisine: ${cuisine ?? "any"}
+
+Rules:
+- Use at least 70% of provided ingredients
+- Maximum 3 additional ingredients allowed
+- Prefer common pantry items
+- Avoid unnecessary ingredients
+- Recipes must be realistic and cookable
+- Return ONLY JSON
+
+Output format:
+{
+  "recipes": [
+    {
+      "name": "",
+      "used_ingredients": [],
+      "missing_ingredients": [],
+      "steps": [],
+      "cook_time_minutes": 0,
+      "difficulty": "easy|medium|hard",
+      "waste_reduction_score": 0
+    }
+  ]
+}`;
+
+    for (const modelName of HUGGINGFACE_RECIPE_MODELS) {
+      const response = await Promise.race([
+        fetch(
+          getHuggingFaceModelUrl(modelName),
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${config.huggingfaceApiKey}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              inputs: prompt,
+              parameters: {
+                max_new_tokens: 700,
+                temperature: 0.7,
+                return_full_text: false,
+              },
+            }),
+          }
+        ),
+        timeoutAfter(HUGGINGFACE_RECIPE_TIMEOUT_MS),
+      ]);
+
+      if (!response.ok) {
+        const errorBody = await response.text();
+        logger.warn(
+          {
+            requestId,
+            provider: "huggingface",
+            model: modelName,
+            status: response.status,
+            statusText: response.statusText,
+            responseBodyPresent: errorBody.length > 0,
           },
-          body: JSON.stringify({
-            inputs: prompt,
-            parameters: { max_new_tokens: 512, temperature: 0.7 },
-          }),
-        }
-      ),
-      timeoutAfter(4000),
-    ]);
+          "HuggingFace recipe API returned non-OK response"
+        );
+        continue;
+      }
 
-    if (!response.ok) return null;
+      const data = (await response.json()) as
+        | Array<{ generated_text: string }>
+        | { generated_text: string };
 
-    const data = (await response.json()) as
-      | Array<{ generated_text: string }>
-      | { generated_text: string };
+      const text = Array.isArray(data)
+        ? data[0]?.generated_text ?? ""
+        : data.generated_text ?? "";
 
-    const text = Array.isArray(data)
-      ? data[0]?.generated_text ?? ""
-      : data.generated_text ?? "";
+      if (!text) {
+        logger.warn(
+          { requestId, provider: "huggingface", model: modelName },
+          "HuggingFace recipe API returned empty text"
+        );
+        continue;
+      }
 
-    if (!text) return null;
+      const parsed = safeJsonParse(text);
+      const strictParsed = GeminiRecipeStrictSchema.safeParse(parsed);
+      if (!strictParsed.success) {
+        logger.warn(
+          {
+            requestId,
+            provider: "huggingface",
+            model: modelName,
+            reason: "invalid_json_structure",
+            responseReceived: true,
+          },
+          "HuggingFace recipe response failed validation"
+        );
+        continue;
+      }
 
-    const recipes = parseAIRecipeResponse(text, ingredientList, cuisine);
-    if (recipes.length === 0) return null;
+      const recipes = withEfficiency(
+        strictParsed.data.recipes.map((recipe) => ({
+          name: recipe.name,
+          description: recipe.steps[0] ?? "",
+          instructions: recipe.steps.join("\n"),
+          cookTime: `${recipe.cook_time_minutes} minutes`,
+          difficulty: recipe.difficulty,
+          used: recipe.used_ingredients,
+          missing: recipe.missing_ingredients,
+          efficiency: computeWasteReductionScore(
+            computeCoveragePercent(recipe.used_ingredients, ingredientList),
+            recipe.missing_ingredients.length,
+            recipe.steps.length
+          ) / 100,
+        })),
+        ingredientList,
+        cuisine
+      );
 
-    logger.info(
-      { requestId, provider: "huggingface", recipeCount: recipes.length },
-      "HuggingFace generated recipes"
-    );
+      if (recipes.length === 0) continue;
 
-    return { recipes, confidence: 0.75 };
+      const hasLowCoverage = recipes.some((recipe) => computeCoveragePercent(recipe.used, ingredientList) < 40);
+      if (hasLowCoverage) {
+        logger.warn(
+          { requestId, provider: "huggingface", model: modelName, reason: "coverage_below_threshold" },
+          "HuggingFace recipe coverage below threshold"
+        );
+        continue;
+      }
+
+      logger.info(
+        { requestId, provider: "huggingface", model: modelName, recipeCount: recipes.length },
+        "HuggingFace generated recipes"
+      );
+
+      return { recipes, confidence: 0.75 };
+    }
+
+    return null;
   } catch (err) {
     logger.warn(
-      { requestId, provider: "huggingface", error: String(err) },
+      { requestId, provider: "huggingface", errorType: err instanceof Error ? err.name : "UnknownError" },
       "HuggingFace recipe generation failed"
     );
     return null;
   }
 }
 
+async function generateRecipesWithProvider(
+  provider: AIProvider,
+  generateText: HostedTextProvider,
+  ingredients: string,
+  cuisine: string | null | undefined,
+  requestId?: string,
+): Promise<{ recipes: Recipe[]; confidence: number } | null> {
+  const ingredientList = normalizeIngredientList(ingredients);
+  const prompt = `You are a professional chef focused on sustainability and minimizing food waste.
+
+Given ingredients: ${ingredientList.join(", ")}
+Cuisine: ${cuisine ?? "any"}
+
+Generate exactly 2 realistic recipes. Use at least 70% of the provided ingredients and no more than 3 additional ingredients.
+Return ONLY JSON in this format:
+{"recipes":[{"name":"","used_ingredients":[],"missing_ingredients":[],"steps":[],"cook_time_minutes":0,"difficulty":"easy|medium|hard","waste_reduction_score":0}]}`;
+
+  const text = await generateText({ prompt, requestId });
+  if (!text) return null;
+  const parsed = GeminiRecipeStrictSchema.safeParse(safeJsonParse(text));
+  if (!parsed.success) {
+    logger.warn(
+      { requestId, provider, reason: "invalid_json_structure" },
+      "Provider recipe response failed validation",
+    );
+    return null;
+  }
+
+  const recipes = withEfficiency(
+    parsed.data.recipes.map((recipe) => ({
+      name: recipe.name,
+      description: recipe.steps[0] ?? "",
+      instructions: recipe.steps.join("\n"),
+      cookTime: `${recipe.cook_time_minutes} minutes`,
+      difficulty: recipe.difficulty,
+      used: recipe.used_ingredients,
+      missing: recipe.missing_ingredients,
+      efficiency: recipe.waste_reduction_score / 100,
+    })),
+    ingredientList,
+    cuisine,
+  );
+
+  if (!recipes.length || recipes.some((recipe) => computeCoveragePercent(recipe.used, ingredientList) < 40)) {
+    return null;
+  }
+  return { recipes, confidence: provider === AIProvider.OpenRouter ? 0.9 : 0.75 };
+}
+
 /**
  * Generate recipes - FULL PIPELINE
- * OpenAI GPT → HuggingFace → Internal Fallback
+ * Gemini → HuggingFace → Internal Fallback
  */
 export async function generateRecipes(
   ingredients: string,
   cuisine: string | null | undefined,
   requestId?: string
 ): Promise<RecipeSuggestion> {
+  totalRecipeRequests += 1;
   const ingredientList = normalizeIngredientList(ingredients);
   const cacheKey = buildRecipeCacheKey(ingredientList, cuisine);
 
   const cached = getCachedRecipeSuggestion(cacheKey);
   if (cached) {
+    if (cached.isFallback) {
+      totalRecipeFallbacks += 1;
+    }
     logger.info(
       {
         requestId,
@@ -838,6 +1433,13 @@ export async function generateRecipes(
   }
 
   if (isAICircuitOpen()) {
+    if (config.aiStrictMode) {
+      const err = new Error("AI providers unavailable — check configuration") as Error & { status?: number };
+      err.status = 503;
+      throw err;
+    }
+
+    totalRecipeFallbacks += 1;
     const fallback = generateFallbackResponse(ingredients, cuisine, AIProvider.Fallback);
     setCachedRecipeSuggestion(cacheKey, fallback);
     logger.warn(
@@ -855,58 +1457,93 @@ export async function generateRecipes(
   }
 
   let aiAttempted = false;
+  const providerTried: AIProvider[] = [];
 
-  // 1. Try OpenAI GPT (primary)
-  if (config.hasOpenAI) {
+  // 1. OpenRouter free router (primary hosted provider)
+  if (config.hasOpenRouter) {
     aiAttempted = true;
-    const result = await generateWithOpenAIGPT(ingredients, cuisine, requestId);
+    providerTried.push(AIProvider.OpenRouter);
+    const result = await generateRecipesWithProvider(
+      AIProvider.OpenRouter,
+      generateWithOpenRouter,
+      ingredients,
+      cuisine,
+      requestId,
+    );
     if (result && result.recipes.length > 0) {
+      const coveragePct = Math.round(
+        result.recipes.reduce((acc, recipe) => acc + computeCoveragePercent(recipe.used, ingredientList), 0) /
+        result.recipes.length
+      );
       const suggestion: RecipeSuggestion = {
         recipes: result.recipes,
         sustainabilityMessage: "You reduced food waste by using available ingredients.",
         ingredientsUsed: ingredientList,
         cuisine: cuisine || null,
         isFallback: false,
-        provider: AIProvider.OpenAI,
+        provider: AIProvider.OpenRouter,
         confidence: result.confidence,
         cacheHit: false,
+        low_confidence: false,
       };
       recordAISuccess();
       setCachedRecipeSuggestion(cacheKey, suggestion);
       logger.info(
         {
           requestId,
+          providerFailureReason: null,
+          ingredientCoveragePct: coveragePct,
+          fallbackTriggered: false,
+          fallbackUsageRate: Number(getFallbackUsageRate().toFixed(3)),
           cacheHit: false,
-          providerUsed: AIProvider.OpenAI,
+          providerUsed: AIProvider.OpenRouter,
           fallbackUsed: false,
           circuitOpen: false,
         },
-        "Recipe suggestion generated by OpenAI"
+        "Recipe suggestion generated by OpenRouter free router"
       );
       return suggestion;
     }
+  } else {
+    logger.warn({ requestId }, "Skipping OpenRouter because OPENROUTER_API_KEY is unavailable");
   }
 
-  // 2. Try HuggingFace (fallback)
+  // 2. Hugging Face free inference allowance
   if (config.hasHuggingFace) {
     aiAttempted = true;
-    const result = await generateWithHuggingFace(ingredients, cuisine, requestId);
+    providerTried.push(AIProvider.HuggingFace);
+    const result = await generateRecipesWithProvider(
+      AIProvider.HuggingFace,
+      generateWithHuggingFaceProvider,
+      ingredients,
+      cuisine,
+      requestId,
+    );
     if (result && result.recipes.length > 0) {
+      const coveragePct = Math.round(
+        result.recipes.reduce((acc, recipe) => acc + computeCoveragePercent(recipe.used, ingredientList), 0) /
+        result.recipes.length
+      );
       const suggestion: RecipeSuggestion = {
         recipes: result.recipes,
         sustainabilityMessage: "You reduced food waste by using available ingredients.",
         ingredientsUsed: ingredientList,
         cuisine: cuisine || null,
-        isFallback: false,
+        isFallback: true,
         provider: AIProvider.HuggingFace,
         confidence: result.confidence,
         cacheHit: false,
+        low_confidence: true,
       };
       recordAISuccess();
       setCachedRecipeSuggestion(cacheKey, suggestion);
       logger.info(
         {
           requestId,
+          providerFailureReason: null,
+          ingredientCoveragePct: coveragePct,
+          fallbackTriggered: false,
+          fallbackUsageRate: Number(getFallbackUsageRate().toFixed(3)),
           cacheHit: false,
           providerUsed: AIProvider.HuggingFace,
           fallbackUsed: false,
@@ -918,117 +1555,298 @@ export async function generateRecipes(
     }
   }
 
+  // 3. Local Ollama; unavailable or missing models are skipped.
+  if (config.hasOllama) {
+    aiAttempted = true;
+    providerTried.push(AIProvider.Ollama);
+    const result = await generateRecipesWithProvider(
+      AIProvider.Ollama,
+      generateWithOllama,
+      ingredients,
+      cuisine,
+      requestId,
+    );
+    if (result && result.recipes.length > 0) {
+      const suggestion: RecipeSuggestion = {
+        recipes: result.recipes,
+        sustainabilityMessage: "You reduced food waste by using available ingredients.",
+        ingredientsUsed: ingredientList,
+        cuisine: cuisine || null,
+        isFallback: true,
+        provider: AIProvider.Ollama,
+        confidence: result.confidence,
+        cacheHit: false,
+        low_confidence: true,
+      };
+      recordAISuccess();
+      setCachedRecipeSuggestion(cacheKey, suggestion);
+      return suggestion;
+    }
+  }
+
   if (aiAttempted) {
     recordAIFailure();
   }
 
-  // 3. Return internal fallback
+  if (config.aiStrictMode) {
+    logger.error(
+      {
+        requestId,
+        providerTried,
+        errorReason: aiAttempted ? "providers_failed_or_empty" : "no_ai_provider_configured",
+      },
+      "Strict mode is enabled and providers are unavailable"
+    );
+    const err = new Error("AI providers unavailable — check configuration") as Error & { status?: number };
+    err.status = 503;
+    throw err;
+  }
+
+  // 4. Return internal deterministic fallback
+  totalRecipeFallbacks += 1;
   const fallback = generateFallbackResponse(ingredients, cuisine, AIProvider.Fallback);
   setCachedRecipeSuggestion(cacheKey, fallback);
   logger.warn(
     {
       requestId,
+      providerTried,
+      errorReason: aiAttempted ? "providers_failed_or_empty" : "no_ai_provider_configured",
+      fallbackUsed: true,
+      fallbackTriggered: true,
+      fallbackUsageRate: Number(getFallbackUsageRate().toFixed(3)),
       cacheHit: false,
       providerUsed: AIProvider.Fallback,
-      fallbackUsed: true,
       circuitOpen: isAICircuitOpen(),
       consecutiveAIFailures,
     },
     "Falling back to internal recipe database"
   );
-  return { ...fallback, cacheHit: false };
+  return { ...fallback, cacheHit: false, low_confidence: true };
 }
 
-const VISION_SYSTEM_PROMPT = `You are a food ingredient detection assistant.
-The user will share a photo of their fridge, pantry shelf, kitchen counter, or grocery haul.
-Your task: identify ONLY the actual food ingredients, produce, packaged foods, condiments, beverages, and cooking staples that are clearly visible in the image.
-
-Rules:
-- List only what you can actually see — do not invent or guess items not visible.
-- Use simple, common names (e.g. "eggs" not "large free-range eggs", "milk" not "whole milk carton").
-- Exclude non-food items (containers, appliances, shelves, utensils).
-- If an item is partially visible but recognisable, include it.
-- Return ONLY a plain comma-separated list of ingredient names. No numbering, no sentences, no explanations.
-
-Example output format:
-eggs, milk, cheddar cheese, spinach, tomatoes, garlic, butter, leftover rice`;
-
-interface HFImageClassificationResponse {
-  label: string;
-  score: number;
+interface HFTextGenerationResponse {
+  generated_text?: string;
+  summary_text?: string;
 }
 
-interface HFImageClassificationOutcome {
-  [key: string]: unknown;
+async function extractIngredientsFromCaptionWithHuggingFace(
+  caption: string,
+  requestId?: string
+): Promise<string[] | null> {
+  if (!config.huggingfaceApiKey) return null;
+
+  const extractionPrompt = `Extract visible food ingredients from this caption.
+Return ONLY JSON in this format:
+{"ingredients":["item1","item2"]}
+
+Caption: ${caption}`;
+
+  for (const modelName of HUGGINGFACE_RECIPE_MODELS) {
+    const response = await Promise.race([
+      fetch(getHuggingFaceModelUrl(modelName), {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${config.huggingfaceApiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          inputs: extractionPrompt,
+          parameters: {
+            max_new_tokens: 220,
+            temperature: 0.2,
+            return_full_text: false,
+          },
+        }),
+      }),
+      timeoutAfter(HUGGINGFACE_IMAGE_TIMEOUT_MS),
+    ]);
+
+    if (!response.ok) {
+      const body = await response.text();
+      logger.warn(
+        { requestId, provider: "huggingface", model: modelName, status: response.status, responseBodyPresent: body.length > 0 },
+        "HuggingFace ingredient extraction API returned non-OK response"
+      );
+      continue;
+    }
+
+    const data = (await response.json()) as HFTextGenerationResponse[] | HFTextGenerationResponse;
+    const text = Array.isArray(data)
+      ? data[0]?.generated_text ?? data[0]?.summary_text ?? ""
+      : data.generated_text ?? data.summary_text ?? "";
+
+    const parsed = safeJsonParse(text);
+    const strictParsed = GeminiIngredientsStrictSchema.safeParse(parsed);
+    if (!strictParsed.success) {
+      continue;
+    }
+
+    return strictParsed.data.ingredients
+      .map((item) => item.trim().toLowerCase())
+      .filter(Boolean)
+      .filter((item, idx, arr) => arr.indexOf(item) === idx)
+      .slice(0, 12);
+  }
+
+  return null;
 }
 
-// OpenAI Vision detection - PRIMARY
-async function detectWithOpenAIVision(
+async function detectWithGeminiVision(
   imageBase64: string,
+  mimeType?: string,
   requestId?: string
 ): Promise<{
   ingredients: string[];
   confidence: number;
   raw: string;
 } | null> {
-  const client = getOpenAIClient();
-  if (!client) return null;
+  if (!config.geminiApiKey) {
+    logger.warn({ requestId, provider: "gemini" }, "Gemini API key unavailable for vision detection");
+    return null;
+  }
 
   try {
     const base64Data = imageBase64.includes(",")
       ? imageBase64.split(",")[1]
       : imageBase64;
 
-    const mimeMatch = imageBase64.match(/^data:(image\/[a-z]+);base64,/);
-    const mimeType = (mimeMatch?.[1] ?? "image/jpeg") as
-      | "image/jpeg"
-      | "image/png"
-      | "image/gif"
-      | "image/webp";
+    const mimeMatch = imageBase64.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,/);
+    const resolvedMimeType = mimeType ?? mimeMatch?.[1];
+    if (!resolvedMimeType) {
+      logger.warn({ requestId, provider: "gemini", reason: "missing_mime_type" }, "Gemini vision skipped due to missing MIME type");
+      return null;
+    }
 
-    const response = await Promise.race([
-      client.chat.completions.create({
-        model: "gpt-4o",
-        max_completion_tokens: 256,
-        messages: [
-          { role: "system", content: VISION_SYSTEM_PROMPT },
-          {
-            role: "user",
-            content: [
-              {
-                type: "image_url",
-                image_url: {
-                  url: `data:${mimeType};base64,${base64Data}`,
-                  detail: "high",
+    const prompt = `You are an AI food vision system.
+
+Analyze this image and extract ONLY visible ingredients.
+
+Rules:
+- Return ONLY valid JSON
+- No explanation text
+- No markdown
+- No extra words
+
+Format:
+{
+  "ingredients": ["item1", "item2", "item3"]
+}`;
+
+    for (let attempt = 0; attempt <= GEMINI_MAX_RETRIES; attempt += 1) {
+      try {
+        logger.info(
+          { requestId, provider: "gemini", model: GEMINI_MODEL, attempt, timeoutMs: GEMINI_TIMEOUT_MS },
+          "Entering Gemini Vision"
+        );
+
+        const response = await Promise.race([
+          fetchGeminiRequest(GEMINI_API_URL, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${config.geminiApiKey}`,
+              "Content-Type": "application/json",
+              "HTTP-Referer": "http://localhost:3000",
+              "X-Gemini-Title": "ZeroPlate Chef",
+            },
+            body: JSON.stringify({
+              model: GEMINI_MODEL,
+              messages: [
+                {
+                  role: "user",
+                  content: [
+                    { type: "text", text: prompt },
+                    {
+                      type: "image_url",
+                      image_url: { url: `data:${resolvedMimeType};base64,${base64Data}` },
+                    },
+                  ],
                 },
-              },
-              {
-                type: "text",
-                text: "List all food ingredients you can see in this image.",
-              },
-            ],
+              ],
+              temperature: 0.2,
+              max_tokens: 800,
+            }),
+          }),
+          timeoutAfter(GEMINI_TIMEOUT_MS),
+        ]);
+
+        if (!response.ok) {
+          const body = await response.text();
+          logger.warn(
+            {
+              requestId,
+              provider: "gemini",
+              model: GEMINI_MODEL,
+              attempt,
+              status: response.status,
+              responseBodyPresent: body.length > 0,
+              ...summarizeGeminiError(body, response.status),
+            },
+            "Gemini vision request returned non-OK response"
+          );
+
+          if (GEMINI_RETRYABLE_STATUSES.has(response.status) && attempt < GEMINI_MAX_RETRIES) {
+            await delay(getGeminiRetryDelay(response, attempt));
+          }
+          continue;
+        }
+
+        const data = (await response.json()) as {
+          choices?: Array<{ message?: { content?: string } }>;
+        };
+        const text = data.choices?.[0]?.message?.content?.trim() ?? "";
+        const parsed = safeJsonParse(text);
+        logger.info({ provider: "gemini", model: GEMINI_MODEL, responseReceived: true, parsed: !!parsed, requestId }, "Gemini vision output debug");
+
+        const strictParsed = GeminiIngredientsStrictSchema.safeParse(parsed);
+        if (!strictParsed.success) {
+          throw new Error("Gemini returned invalid structure");
+        }
+
+        const ingredients = strictParsed.data.ingredients
+          .map((item) => item.trim().toLowerCase())
+          .filter(Boolean)
+          .filter((item, idx, arr) => arr.indexOf(item) === idx)
+          .slice(0, 12);
+
+        if (!ingredients.length) {
+          throw new Error("Gemini returned empty ingredient list");
+        }
+
+        logger.info(
+          { requestId, providerUsed: "gemini", model: GEMINI_MODEL, ingredientCount: ingredients.length, fallbackTriggered: false },
+          "Gemini Vision detected ingredients"
+        );
+
+        return { ingredients, confidence: 0.95, raw: text };
+      } catch (err) {
+        const isLastAttempt = attempt >= GEMINI_MAX_RETRIES;
+        logger.warn(
+          {
+            requestId,
+            provider: "gemini",
+            model: GEMINI_MODEL,
+            attempt,
+            retrying: !isLastAttempt,
+            reason: String(err),
           },
-        ],
-      }),
-      timeoutAfter(4000),
-    ]);
+          "Gemini vision attempt failed"
+        );
 
-    const rawText = response.choices[0]?.message?.content?.trim() ?? "";
-    if (!rawText) return null;
+        if (!isLastAttempt) {
+          await delay(250 * Math.pow(2, attempt));
+        }
+      }
+    }
 
-    const ingredients = parseIngredientsFromText(rawText);
-    if (ingredients.length === 0) return null;
-
-    logger.info(
-      { requestId, provider: "openai", count: ingredients.length },
-      "OpenAI Vision detected ingredients"
-    );
-
-    return { ingredients, confidence: 0.95, raw: rawText };
+    return null;
   } catch (err) {
     logger.warn(
-      { requestId, provider: "openai", error: String(err) },
-      "OpenAI Vision detection failed"
+      { requestId, provider: "gemini", errorType: err instanceof Error ? err.name : "UnknownError" },
+      "Gemini failed"
+    );
+    logger.warn(
+      { requestId, provider: "gemini", errorType: err instanceof Error ? err.name : "UnknownError" },
+      "Gemini vision detection failed"
     );
     return null;
   }
@@ -1037,122 +1855,237 @@ async function detectWithOpenAIVision(
 // HuggingFace image classification - FALLBACK
 async function detectWithHuggingFace(
   imageBase64: string,
+  mimeType?: string,
   requestId?: string
 ): Promise<{
   ingredients: string[];
   confidence: number;
 } | null> {
-  if (!config.huggingfaceApiKey) return null;
+  if (!config.huggingfaceApiKey) {
+    logger.warn({ requestId, provider: "huggingface" }, "HuggingFace API key unavailable for image detection");
+    return null;
+  }
 
   try {
-    // Use HF image classification model
+    logger.info(
+      {
+        requestId,
+        provider: "huggingface",
+        timeoutMs: HUGGINGFACE_IMAGE_TIMEOUT_MS,
+        model: HUGGINGFACE_IMAGE_MODEL,
+      },
+      "Entering HuggingFace"
+    );
+
     const base64Data = imageBase64.includes(",")
       ? imageBase64.split(",")[1]
       : imageBase64;
 
+    if (!mimeType) {
+      logger.warn({ requestId, provider: "huggingface", reason: "missing_mime_type" }, "Skipping HuggingFace vision due to missing MIME type");
+      return null;
+    }
+
     const response = await Promise.race([
       fetch(
-        "https://api-inference.huggingface.co/models/google/vit-base-patch16-224",
+        HUGGINGFACE_IMAGE_API_URL,
         {
           method: "POST",
           headers: {
             Authorization: `Bearer ${config.huggingfaceApiKey}`,
-            "Content-Type": "application/x-www-form-urlencoded",
+            "Content-Type": "application/octet-stream",
           },
           body: Buffer.from(base64Data, "base64"),
         }
       ),
-      timeoutAfter(4000),
+      timeoutAfter(HUGGINGFACE_IMAGE_TIMEOUT_MS),
     ]);
 
-    if (!response.ok) return null;
+    if (!response.ok) {
+      const errorBody = await response.text();
+      logger.warn(
+        {
+          requestId,
+          provider: "huggingface",
+          status: response.status,
+          statusText: response.statusText,
+          responseBodyPresent: errorBody.length > 0,
+        },
+        "HuggingFace image API returned non-OK response"
+      );
+      return null;
+    }
 
-    const data = (await response.json()) as Array<HFImageClassificationResponse>;
-    if (!Array.isArray(data)) return null;
+    const data = (await response.json()) as HFTextGenerationResponse[] | HFTextGenerationResponse;
+    const caption = Array.isArray(data)
+      ? data[0]?.generated_text ?? data[0]?.summary_text ?? ""
+      : data.generated_text ?? data.summary_text ?? "";
 
-    // Map image labels to ingredient names (heuristic)
-    const ingredients = data
-      .slice(0, 10)
-      .filter((item) => item.score > 0.3)
-      .map((item) => {
-        const label = item.label.toLowerCase();
-        // Very basic label → ingredient mapping
-        if (label.includes("food")) return null;
-        if (label.includes("or")) return null; // "or" categories
-        return label.split(",")[0]?.trim();
-      })
-      .filter((s): s is string => !!s && s.length > 1 && s.length < 50)
-      .slice(0, 8);
+    if (!caption) {
+      logger.warn(
+        {
+          requestId,
+          provider: "huggingface",
+          responseType: typeof data,
+        },
+        "HuggingFace image caption response was empty"
+      );
+      return null;
+    }
 
-    if (ingredients.length === 0) return null;
-
-    const avgConfidence = data.slice(0, 10).reduce((sum, d) => sum + d.score, 0) / Math.min(data.length, 10);
+    const ingredients = await extractIngredientsFromCaptionWithHuggingFace(caption, requestId);
+    if (!ingredients || ingredients.length === 0) {
+      logger.warn(
+        { requestId, provider: "huggingface", caption: caption.slice(0, 400) },
+        "HuggingFace caption to ingredients extraction failed"
+      );
+      return null;
+    }
 
     logger.info(
-      { requestId, provider: "huggingface", count: ingredients.length, confidence: avgConfidence },
+      { requestId, providerUsed: "huggingface", count: ingredients.length, confidence: 0.65, fallbackTriggered: false },
       "HuggingFace detected ingredients"
     );
 
-    return { ingredients, confidence: Math.min(0.7, avgConfidence) };
+    return { ingredients, confidence: 0.65 };
   } catch (err) {
     logger.warn(
-      { requestId, provider: "huggingface", error: String(err) },
+      { requestId, provider: "huggingface", errorType: err instanceof Error ? err.name : "UnknownError" },
       "HuggingFace image detection failed"
     );
     return null;
   }
 }
 
-// Parse comma-separated ingredient text
-function parseIngredientsFromText(text: string): string[] {
-  return text
-    .split(/,|;|\n/)
-    .map((s) =>
-      s
-        .trim()
-        .toLowerCase()
-        .replace(/^[-•*\d.]+\s*/, "")
-        .replace(/[^a-z0-9 ()/'-]/g, "")
-        .trim()
-    )
-    .filter((s) => s.length > 1 && s.length < 50)
-    .slice(0, 20);
+async function detectWithProvider(
+  provider: AIProvider,
+  generateText: (request: {
+    prompt: string;
+    requestId?: string;
+    imageBase64: string;
+    mimeType?: string;
+  }) => Promise<string | null>,
+  imageBase64: string,
+  mimeType: string | undefined,
+  requestId?: string,
+): Promise<{ ingredients: string[]; confidence: number } | null> {
+  if (!mimeType) return null;
+  const text = await generateText({
+    prompt: "Identify only the visible food ingredients. Return JSON: {\"ingredients\":[\"item\"]}.",
+    requestId,
+    imageBase64,
+    mimeType,
+  });
+  const parsed = GeminiIngredientsStrictSchema.safeParse(safeJsonParse(text || ""));
+  if (!parsed.success) return null;
+  const ingredients = parsed.data.ingredients
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean)
+    .filter((item, index, values) => values.indexOf(item) === index)
+    .slice(0, 12);
+  return ingredients.length
+    ? { ingredients, confidence: provider === AIProvider.OpenRouter ? 0.9 : 0.7 }
+    : null;
 }
 
 // Detect ingredients - FULL PIPELINE
 export async function detectIngredientsFromImage(
   imageBase64: string,
+  mimeType?: string,
   requestId?: string
 ): Promise<IngredientDetectionResult> {
-  // 1. Try OpenAI Vision (primary)
-  if (config.hasOpenAI) {
-    const result = await detectWithOpenAIVision(imageBase64, requestId);
+  const providerTried: AIProvider[] = [];
+
+  // 1. OpenRouter free router (primary)
+  if (config.hasOpenRouter) {
+    providerTried.push(AIProvider.OpenRouter);
+    const result = await detectWithProvider(
+      AIProvider.OpenRouter,
+      (request) => generateWithOpenRouter(request),
+      imageBase64,
+      mimeType,
+      requestId,
+    );
     if (result && result.ingredients.length > 0) {
       return {
         ingredients: result.ingredients,
         confidence: result.confidence,
         isApproximate: false,
-        provider: AIProvider.OpenAI,
+        provider: AIProvider.OpenRouter,
+        low_confidence: false,
       };
     }
+  } else {
+    logger.warn({ requestId }, "Skipping OpenRouter vision because OPENROUTER_API_KEY is unavailable");
   }
 
-  // 2. Try HuggingFace (fallback)
+  // 2. Hugging Face free inference allowance (fallback)
   if (config.hasHuggingFace) {
-    const result = await detectWithHuggingFace(imageBase64, requestId);
+    providerTried.push(AIProvider.HuggingFace);
+    const result = await detectWithProvider(
+      AIProvider.HuggingFace,
+      (request) => generateWithHuggingFaceProvider(request),
+      imageBase64,
+      mimeType,
+      requestId,
+    );
     if (result && result.ingredients.length > 0) {
       return {
         ingredients: result.ingredients,
         confidence: result.confidence,
         isApproximate: false,
         provider: AIProvider.HuggingFace,
+        low_confidence: true,
+      };
+    }
+  } else {
+    logger.warn({ requestId }, "Skipping HuggingFace because hasHuggingFace=false");
+  }
+
+  // 3. Local Ollama vision model (fallback)
+  if (config.hasOllama) {
+    providerTried.push(AIProvider.Ollama);
+    const result = await detectWithProvider(
+      AIProvider.Ollama,
+      (request) => analyzeWithOllama(request),
+      imageBase64,
+      mimeType,
+      requestId,
+    );
+    if (result && result.ingredients.length > 0) {
+      return {
+        ingredients: result.ingredients,
+        confidence: result.confidence,
+        isApproximate: true,
+        provider: AIProvider.Ollama,
+        low_confidence: true,
       };
     }
   }
 
-  // 3. Return reliable fallback
+  // 4. Return reliable fallback
+  if (config.aiStrictMode) {
+    logger.error(
+      {
+        requestId,
+        providerTried,
+        errorReason: "all_providers_failed_or_empty",
+      },
+      "Strict mode is enabled and providers are unavailable for image detection"
+    );
+    const err = new Error("AI providers unavailable — check configuration") as Error & { status?: number };
+    err.status = 503;
+    throw err;
+  }
+
   logger.warn(
-    { requestId, reason: "all_providers_failed" },
+    {
+      requestId,
+      providerTried,
+      errorReason: "all_providers_failed_or_empty",
+      fallbackUsed: true,
+      reason: "all_providers_failed",
+    },
     "Using hardcoded fallback ingredients"
   );
   return {
@@ -1160,5 +2093,6 @@ export async function detectIngredientsFromImage(
     confidence: 0.5,
     isApproximate: true,
     provider: AIProvider.Fallback,
+    low_confidence: true,
   };
 }

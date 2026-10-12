@@ -55,6 +55,8 @@ import { connectDB, disconnectDB, isConnected as isDbConnected } from "./db/inde
     environment: config.nodeEnv,
     port: config.port,
     logLevel: config.logLevel,
+    hasGemini: config.hasGemini,
+    hasHuggingFace: config.hasHuggingFace,
   }, "Configuration loaded");
 
   // Initialize database connection
@@ -69,17 +71,30 @@ import { connectDB, disconnectDB, isConnected as isDbConnected } from "./db/inde
 
   // Log AI services status
   logger.info({
-    openai: config.openaiApiKey ? "✓ configured" : "✗ not configured",
+    gemini: config.hasGemini ? "✓ configured" : "✗ not configured",
     huggingface: config.huggingfaceApiKey ? "✓ configured" : "✗ not configured",
-  }, "AI Services status");
+  }, "AI provider configuration");
 
   // Start server
-  server = app.listen(config.port, (err) => {
-    if (err) {
+  server = app.listen(config.port);
+
+  server.once("error", async (err: NodeJS.ErrnoException) => {
+    if (err.code === "EADDRINUSE") {
+      logger.error({ port: config.port }, "Port is already in use. Stop the existing process or set PORT to another value.");
+    } else {
       logger.error({ err }, "Error listening on port");
-      process.exit(1);
     }
 
+    try {
+      await disconnectDB();
+    } catch (disconnectErr) {
+      logger.error({ err: disconnectErr }, "Failed to disconnect DB after listen error");
+    }
+
+    process.exit(1);
+  });
+
+  server.once("listening", () => {
     logger.info(`
 ╔════════════════════════════════════════════════════════════╗
 ║                                                            ║

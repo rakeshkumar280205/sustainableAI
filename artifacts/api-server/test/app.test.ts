@@ -63,7 +63,7 @@ describe("API server", () => {
             ingredientsUsed: ["tomato", "pasta"],
             cuisine: "italian",
             isFallback: false,
-            provider: "openai",
+            provider: "gemini",
             confidence: 0.92,
             cacheHit: false,
         });
@@ -78,7 +78,7 @@ describe("API server", () => {
             success: true,
             error: null,
             data: {
-                provider: "openai",
+                provider: "gemini",
                 isFallback: false,
                 confidence: 0.92,
                 recipes: [
@@ -87,6 +87,45 @@ describe("API server", () => {
                         difficulty: "Easy",
                     },
                 ],
+            },
+        });
+    });
+
+    it("preserves fallback metadata when Gemini is unavailable", async () => {
+        vi.mocked(generateRecipes).mockResolvedValue({
+            recipes: [
+                {
+                    name: "Tomato Pasta",
+                    description: "A local fallback suggestion.",
+                    instructions: "Cook the pasta with the tomato.",
+                    cookTime: "20 minutes",
+                    difficulty: "Easy",
+                    used: ["tomato", "pasta"],
+                    missing: [],
+                },
+            ],
+            sustainabilityMessage: "Use ingredients you already have.",
+            ingredientsUsed: ["tomato", "pasta"],
+            cuisine: "italian",
+            isFallback: true,
+            provider: "fallback",
+            confidence: 0.45,
+            low_confidence: true,
+            cacheHit: false,
+        });
+
+        const response = await request(app)
+            .post("/api/recipes")
+            .send({ ingredients: "tomato, pasta", cuisine: "italian" })
+            .set("Content-Type", "application/json");
+
+        expect(response.status).toBe(200);
+        expect(response.body).toMatchObject({
+            success: true,
+            data: {
+                provider: "fallback",
+                isFallback: true,
+                low_confidence: true,
             },
         });
     });

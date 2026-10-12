@@ -18,3 +18,7 @@ coverage
 .vercel
 .cache
 tmp/
+# Python generated files
+__pycache__/
+*.py[cod]
+.venv/

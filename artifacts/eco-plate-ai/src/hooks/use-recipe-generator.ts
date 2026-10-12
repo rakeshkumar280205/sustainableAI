@@ -17,8 +17,9 @@ export const CUISINE_OPTIONS = [
 ];
 
 export enum AIProvider {
-  OpenAI = "openai",
+  OpenRouter = "openrouter",
   HuggingFace = "huggingface",
+  Ollama = "ollama",
   Fallback = "fallback",
 }
 
@@ -41,6 +42,7 @@ export interface RecipeData {
   isFallback: boolean;
   provider: AIProvider;
   confidence?: number;
+  low_confidence?: boolean;
 }
 
 export interface IngredientDetectionResult {
@@ -48,6 +50,7 @@ export interface IngredientDetectionResult {
   confidence: number;
   isApproximate: boolean;
   provider: AIProvider;
+  low_confidence?: boolean;
 }
 
 interface ApiError {
@@ -115,11 +118,13 @@ export function useRecipeGenerator() {
 
       // Show provider indicator toast
       const providerName =
-        recipeResponse.provider === AIProvider.OpenAI
-          ? "✨ OpenAI"
+        recipeResponse.provider === AIProvider.OpenRouter
+          ? "✨ OpenRouter"
           : recipeResponse.provider === AIProvider.HuggingFace
             ? "🤗 HuggingFace"
-            : "💾 Fallback";
+            : recipeResponse.provider === AIProvider.Ollama
+              ? "🖥️ Ollama"
+              : "💾 Fallback";
 
       const confidencePercent = recipeResponse.confidence
         ? Math.round(recipeResponse.confidence * 100)
@@ -192,11 +197,13 @@ export function useRecipeGenerator() {
 
       // Show provider indicator
       const providerName =
-        detectionResult.provider === AIProvider.OpenAI
-          ? "✨ OpenAI Vision"
+        detectionResult.provider === AIProvider.OpenRouter
+          ? "✨ OpenRouter Vision"
           : detectionResult.provider === AIProvider.HuggingFace
             ? "🤗 HuggingFace"
-            : "💾 Fallback";
+            : detectionResult.provider === AIProvider.Ollama
+              ? "🖥️ Ollama Vision"
+              : "💾 Fallback";
 
       const confidencePercent = Math.round(detectionResult.confidence * 100);
 

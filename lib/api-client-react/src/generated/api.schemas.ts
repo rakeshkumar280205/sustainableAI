@@ -23,8 +23,9 @@ export interface ErrorEnvelope {
 }
 
 export type HealthStatusAi = {
-  openai: string;
+  openrouter: string;
   huggingface: string;
+  ollama: string;
 };
 
 export interface HealthStatus {
@@ -76,6 +77,7 @@ export interface GenerateRecipesResponse {
   provider: string;
   confidence?: number;
   cacheHit?: boolean;
+  low_confidence?: boolean;
 }
 
 export interface GenerateRecipesResponseEnvelope {
@@ -94,6 +96,7 @@ export interface DetectIngredientsResponse {
   confidence: number;
   isApproximate: boolean;
   provider: string;
+  low_confidence?: boolean;
 }
 
 export interface DetectIngredientsResponseEnvelope {
@@ -148,4 +151,3 @@ export interface RecipeStatsResponseEnvelope {
   /** @nullable */
   error: null;
 }
-

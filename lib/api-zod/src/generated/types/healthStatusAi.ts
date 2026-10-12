@@ -7,6 +7,7 @@
  */
 
 export type HealthStatusAi = {
-  openai: string;
+  openrouter: string;
   huggingface: string;
+  ollama: string;
 };

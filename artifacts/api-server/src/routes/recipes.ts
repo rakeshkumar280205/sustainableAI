@@ -143,6 +143,8 @@ router.post(
   asyncHandler(async (req, res): Promise<void> => {
     const requestId = (req as any).id;
 
+    logger.info({ requestId, route: "/recipes/detect-ingredients" }, "Image detection route invoked");
+
     if (!req.file) {
       logger.warn({ requestId }, "Image detection attempted without file");
       sendValidatedResponse(res, 400, ErrorEnvelopeSchema, {
@@ -167,9 +169,30 @@ router.post(
       return;
     }
 
-    // Convert buffer to base64 for AI processing
+    logger.info(
+      {
+        requestId,
+        fileReceived: true,
+        originalname: req.file.originalname,
+        mimetype: req.file.mimetype,
+        sizeBytes: req.file.size,
+        bufferSize: req.file.buffer.length,
+      },
+      "Image file parsed successfully by multer"
+    );
+
+    // Convert buffer to base64 data URL for AI processing and preserve MIME type.
     const imageBase64 = req.file.buffer.toString("base64");
-    const result = await detectIngredientsFromImage(imageBase64, requestId);
+    const imageDataUrl = `data:${req.file.mimetype};base64,${imageBase64}`;
+    logger.info(
+      {
+        requestId,
+        imageBase64Length: imageBase64.length,
+        mimeType: req.file.mimetype,
+      },
+      "Passing image payload to AI service"
+    );
+    const result = await detectIngredientsFromImage(imageDataUrl, req.file.mimetype, requestId);
 
     const validatedResponse = validateResponse(
       DetectIngredientsResponse,

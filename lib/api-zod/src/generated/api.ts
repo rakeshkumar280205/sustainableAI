@@ -14,16 +14,17 @@ import * as zod from 'zod';
 export const HealthCheckResponse = zod.object({
   "success": zod.boolean(),
   "data": zod.object({
-  "status": zod.string(),
-  "timestamp": zod.string(),
-  "environment": zod.string(),
-  "port": zod.number(),
-  "database": zod.string(),
-  "ai": zod.object({
-  "openai": zod.string(),
-  "huggingface": zod.string()
-})
-}),
+    "status": zod.string(),
+    "timestamp": zod.string(),
+    "environment": zod.string(),
+    "port": zod.number(),
+    "database": zod.string(),
+    "ai": zod.object({
+      "openrouter": zod.string(),
+      "huggingface": zod.string(),
+      "ollama": zod.string()
+    })
+  }),
   "error": zod.null()
 })
 
@@ -32,30 +33,31 @@ export const HealthCheckResponse = zod.object({
  * @summary Generate cuisine-specific recipe suggestions
  */
 export const GenerateRecipesBody = zod.object({
-  "ingredients": zod.union([zod.string(),zod.array(zod.string())]).describe('Ingredients as comma-separated string or array of strings'),
+  "ingredients": zod.union([zod.string(), zod.array(zod.string())]).describe('Ingredients as comma-separated string or array of strings'),
   "cuisine": zod.string().nullish().describe('Optional cuisine type (e.g. Italian, Indian, Chinese)')
 })
 
 export const GenerateRecipesResponse = zod.object({
   "success": zod.boolean(),
   "data": zod.object({
-  "recipes": zod.array(zod.object({
-  "name": zod.string(),
-  "description": zod.string(),
-  "instructions": zod.string(),
-  "cookTime": zod.string(),
-  "difficulty": zod.string(),
-  "used": zod.array(zod.string()).describe('Ingredients from the user\'s list that this recipe uses'),
-  "missing": zod.array(zod.string()).describe('Ingredients this recipe needs that the user doesn\'t have')
-})),
-  "sustainabilityMessage": zod.string(),
-  "ingredientsUsed": zod.array(zod.string()),
-  "cuisine": zod.string().nullable(),
-  "isFallback": zod.boolean().describe('True when smart fallback recipes were used instead of live AI'),
-  "provider": zod.string(),
-  "confidence": zod.number().optional(),
-  "cacheHit": zod.boolean().optional()
-}),
+    "recipes": zod.array(zod.object({
+      "name": zod.string(),
+      "description": zod.string(),
+      "instructions": zod.string(),
+      "cookTime": zod.string(),
+      "difficulty": zod.string(),
+      "used": zod.array(zod.string()).describe('Ingredients from the user\'s list that this recipe uses'),
+      "missing": zod.array(zod.string()).describe('Ingredients this recipe needs that the user doesn\'t have')
+    })),
+    "sustainabilityMessage": zod.string(),
+    "ingredientsUsed": zod.array(zod.string()),
+    "cuisine": zod.string().nullable(),
+    "isFallback": zod.boolean().describe('True when smart fallback recipes were used instead of live AI'),
+    "provider": zod.string(),
+    "confidence": zod.number().optional(),
+    "cacheHit": zod.boolean().optional(),
+    "low_confidence": zod.boolean().optional()
+  }),
   "error": zod.null()
 })
 
@@ -70,11 +72,12 @@ export const DetectIngredientsBody = zod.object({
 export const DetectIngredientsResponse = zod.object({
   "success": zod.boolean(),
   "data": zod.object({
-  "ingredients": zod.array(zod.string()),
-  "confidence": zod.number(),
-  "isApproximate": zod.boolean(),
-  "provider": zod.string()
-}),
+    "ingredients": zod.array(zod.string()),
+    "confidence": zod.number(),
+    "isApproximate": zod.boolean(),
+    "provider": zod.string(),
+    "low_confidence": zod.boolean().optional()
+  }),
   "error": zod.null()
 })
 
@@ -85,15 +88,15 @@ export const DetectIngredientsResponse = zod.object({
 export const GetRecipeHistoryResponse = zod.object({
   "success": zod.boolean(),
   "data": zod.object({
-  "history": zod.array(zod.object({
-  "id": zod.string(),
-  "ingredients": zod.string(),
-  "cuisine": zod.string().nullable(),
-  "recipeCount": zod.number(),
-  "missingCount": zod.number(),
-  "createdAt": zod.string()
-}))
-}),
+    "history": zod.array(zod.object({
+      "id": zod.string(),
+      "ingredients": zod.string(),
+      "cuisine": zod.string().nullable(),
+      "recipeCount": zod.number(),
+      "missingCount": zod.number(),
+      "createdAt": zod.string()
+    }))
+  }),
   "error": zod.null()
 })
 
@@ -108,8 +111,8 @@ export const DeleteRecipeHistoryParams = zod.object({
 export const DeleteRecipeHistoryResponse = zod.object({
   "success": zod.boolean(),
   "data": zod.object({
-  "deleted": zod.boolean()
-}),
+    "deleted": zod.boolean()
+  }),
   "error": zod.null()
 })
 
@@ -120,12 +123,11 @@ export const DeleteRecipeHistoryResponse = zod.object({
 export const GetRecipeStatsResponse = zod.object({
   "success": zod.boolean(),
   "data": zod.object({
-  "totalSearches": zod.number(),
-  "totalIngredientsUsed": zod.number(),
-  "mostUsedIngredients": zod.array(zod.string()),
-  "wasteReductionScore": zod.number()
-}),
+    "totalSearches": zod.number(),
+    "totalIngredientsUsed": zod.number(),
+    "mostUsedIngredients": zod.array(zod.string()),
+    "wasteReductionScore": zod.number()
+  }),
   "error": zod.null()
 })
-
 

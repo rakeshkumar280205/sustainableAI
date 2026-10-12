@@ -10,7 +10,6 @@ const router: IRouter = Router();
 
 router.get("/healthz", asyncHandler(async (_req, res) => {
   const dbConnected = isConnected();
-  const aiAvailable = !!config.openaiApiKey;
 
   const healthData = {
     status: "ok",
@@ -19,8 +18,9 @@ router.get("/healthz", asyncHandler(async (_req, res) => {
     port: config.port,
     database: dbConnected ? "connected" : "disconnected",
     ai: {
-      openai: aiAvailable ? "available" : "fallback",
-      huggingface: !!config.huggingfaceApiKey ? "available" : "unavailable",
+      openrouter: config.hasOpenRouter ? "available" : "missing",
+      huggingface: config.hasHuggingFace ? "available" : "skipped",
+      ollama: config.hasOllama ? "enabled" : "skipped",
     },
   };
 
@@ -31,6 +31,32 @@ router.get("/healthz", asyncHandler(async (_req, res) => {
     data: healthData,
     error: null,
   }, "GET /healthz");
+}));
+
+router.get("/ai/health", asyncHandler(async (req, res) => {
+  const requestId = (req as any).id;
+  const lastChecked = new Date().toISOString();
+
+  const payload = {
+    openrouter: config.hasOpenRouter ? "configured" : "missing",
+    huggingface: config.hasHuggingFace ? "enabled" : "skipped",
+    ollama: config.hasOllama ? "enabled" : "skipped",
+    fallback: "available",
+    lastChecked,
+  };
+
+  logger.info(
+    {
+      requestId,
+      lastChecked,
+      openrouter: payload.openrouter,
+      huggingface: payload.huggingface,
+      ollama: payload.ollama,
+    },
+    "AI provider health check completed"
+  );
+
+  res.status(200).json(payload);
 }));
 
 export default router;
